@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/main"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#ECE5D8"
+    tools:context=".MainActivity">
+
+    <com.astramadeus.client.UiStatePreviewView
+        android:id="@+id/uiStatePreviewView"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_margin="8dp"
+        android:background="#14000000"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <LinearLayout
+        android:id="@+id/toolsHeader"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="8dp"
+        android:background="#DDF5EFE1"
+        android:elevation="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        app:layout_constraintBottom_toTopOf="@id/toolsPanel"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/tools_drawer_title"
+            android:textAppearance="@style/TextAppearance.MaterialComponents.Subtitle1"
+            android:textColor="#1D2A35" />
+
+        <ImageButton
+            android:id="@+id/toggleToolsButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="#14000000"
+            android:contentDescription="@string/collapse_tools"
+            android:padding="8dp"
+            android:src="@android:drawable/arrow_down_float"
+            app:tint="#1D2A35" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/toolsPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="16dp"
+        android:animateLayoutChanges="true"
+        android:background="#EEF9F3E8"
+        android:elevation="12dp"
+        android:orientation="vertical"
+        android:padding="14dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/service_status_label"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Body2"
+                android:textColor="#4D5A67" />
+
+            <TextView
+                android:id="@+id/serviceStatusValue"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:text="@string/service_status_disabled"
+                android:textAppearance="@style/TextAppearance.MaterialComponents.Body1"
+                android:textColor="#1D2A35" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/latestSnapshotValue"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/waiting_for_snapshot"
+            android:textAppearance="@style/TextAppearance.MaterialComponents.Caption"
+            android:textColor="#4D5A67" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/openAccessibilitySettingsButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/open_accessibility_settings" />
+
+            <Button
+                android:id="@+id/refreshStatusButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:text="@string/refresh_status" />
+        </LinearLayout>
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

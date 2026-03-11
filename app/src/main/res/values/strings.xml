@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">AmadeusClient</string>
+    <string name="accessibility_service_label">Amadeus Accessibility</string>
+    <string name="accessibility_service_description">Capture the active screen UI tree in real time for AstrBot.</string>
+    <string name="service_status_label">Accessibility service</string>
+    <string name="service_status_enabled">Enabled</string>
+    <string name="service_status_disabled">Disabled</string>
+    <string name="open_accessibility_settings">Open accessibility settings</string>
+    <string name="refresh_status">Refresh status</string>
+    <string name="latest_event_label">Latest UI snapshot</string>
+    <string name="waiting_for_snapshot">No UI snapshot yet. Enable the accessibility service and switch apps to start capturing.</string>
+    <string name="preview_parse_failed">Unable to parse the latest ui_state snapshot.</string>
+    <string name="preview_ready">Rendering latest ui_state preview.</string>
+    <string name="tools_drawer_title">Debug Tools</string>
+    <string name="expand_tools">Expand tools panel</string>
+    <string name="collapse_tools">Collapse tools panel</string>
+</resources>
