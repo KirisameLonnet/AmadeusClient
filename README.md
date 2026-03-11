@@ -1,41 +1,39 @@
 # AmadeusClient
 
-AmadeusClient is an Android client used by AstrBot to control a physical phone.
+AmadeusClient 是 AstrBot 用于控制安卓手机的客户端应用。
 
-## Project Status
+## 项目状态
 
-This project is still under active development.
+本项目仍在持续开发中。
 
-## What It Is
+## 项目定位
 
-AmadeusClient is the device-side app in the AstrBot system.
-It does not perform complex reasoning.
-It focuses on two tasks:
+AmadeusClient 运行在安卓物理机上，核心职责是执行设备侧能力，不承担复杂推理。
 
-1. Perception: capture the current UI state through Android Accessibility.
-2. Action execution: execute phone actions sent by AstrBot.
+主要分为两部分：
 
-## Current Implementation
+1. 感知（Perception）：通过 Android 无障碍服务获取当前页面的 UI 状态。
+2. 执行（Action）：接收 AstrBot 下发的动作并在手机上执行。
 
-The current version already includes:
+## 当前已实现
 
-1. Accessibility service registration and runtime enablement flow.
-2. Real-time UI tree capture from the active window.
-3. UI snapshot serialization into structured `ui_state` JSON.
-4. Snapshot filtering and deduplication to reduce repeated noise.
-5. In-app visual preview that renders the latest `ui_state` as a screen-like layout.
+当前版本已完成以下能力：
 
-## High-Level Principle
+1. 无障碍服务注册与启用链路。
+2. 前台活跃窗口 UI 树实时抓取。
+3. UI 快照序列化为结构化 `ui_state` JSON。
+4. 基础过滤与去重，减少重复噪声。
+5. 应用内可视化预览：按 `ui_state` 信息渲染页面结构示意图。
 
-1. Android Accessibility events are observed on-device.
-2. The active UI node tree is converted into a structured snapshot.
-3. The snapshot is used as the perception input for AstrBot.
-4. AstrBot will later send action commands back to this client for execution.
+## 工作原理（简版）
 
-## Next Steps
+1. 客户端监听无障碍事件。
+2. 读取当前窗口节点树并生成 `ui_state`。
+3. 该 `ui_state` 作为 AstrBot 的页面感知输入。
+4. 后续由 AstrBot 回传动作指令，客户端负责执行。
 
-Planned work includes:
+## 下一步计划
 
-1. WebSocket communication with AstrBot.
-2. Action command execution pipeline (`click`, `swipe`, `input_text`, `back`, `home`).
-3. Better handling for black-box / low-accessibility pages.
+1. 对接 WebSocket 通信链路。
+2. 完成动作执行闭环（`click`、`swipe`、`input_text`、`back`、`home`）。
+3. 优化黑盒/低可访问性页面的识别与处理策略。
