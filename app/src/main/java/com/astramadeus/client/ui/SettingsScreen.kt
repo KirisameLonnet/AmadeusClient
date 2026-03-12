@@ -69,6 +69,7 @@ private enum class SettingsPage {
     Main,
     VisionApps,
     WebSocket,
+    Ocr,
 }
 
 private data class InstalledAppItem(
@@ -99,10 +100,12 @@ fun SettingsScreen(
             onRefresh = onRefresh,
             onOpenVisionApps = { page = SettingsPage.VisionApps },
             onOpenWebSocket = { page = SettingsPage.WebSocket },
+            onOpenOcrSettings = { page = SettingsPage.Ocr },
         )
 
         SettingsPage.VisionApps -> VisionAssistAppsPage(onBack = { page = SettingsPage.Main })
         SettingsPage.WebSocket -> WebSocketSettingsPage(onBack = { page = SettingsPage.Main })
+        SettingsPage.Ocr -> OcrSettingsPage(onBack = { page = SettingsPage.Main })
     }
 }
 
@@ -113,6 +116,7 @@ private fun SettingsMainPage(
     onRefresh: () -> Unit,
     onOpenVisionApps: () -> Unit,
     onOpenWebSocket: () -> Unit,
+    onOpenOcrSettings: () -> Unit,
 ) {
     val serviceStatus = if (serviceEnabled) {
         stringResource(R.string.service_status_enabled)
@@ -217,6 +221,103 @@ private fun SettingsMainPage(
                 )
             }
         }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenOcrSettings)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.ocr_settings_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = stringResource(R.string.ocr_parallelism_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = stringResource(R.string.ocr_settings_title),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OcrSettingsPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var ocrParallelism by remember {
+        mutableStateOf(OcrPipelineConfig.getMaxParallelism(context).toFloat())
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.back),
+                )
+            }
+            Text(
+                text = stringResource(R.string.ocr_settings_title),
+                style = MaterialTheme.typography.titleLarge,
+            )
+        }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.ocr_parallelism_label, ocrParallelism.toInt()),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Slider(
+                    value = ocrParallelism,
+                    onValueChange = { value ->
+                        ocrParallelism = value.roundToInt().toFloat()
+                    },
+                    valueRange = OcrPipelineConfig.MIN_PARALLELISM.toFloat()..OcrPipelineConfig.MAX_PARALLELISM.toFloat(),
+                    steps = OcrPipelineConfig.MAX_PARALLELISM - OcrPipelineConfig.MIN_PARALLELISM - 1,
+                    onValueChangeFinished = {
+                        val normalized = OcrPipelineConfig.normalizeParallelism(ocrParallelism.roundToInt())
+                        ocrParallelism = normalized.toFloat()
+                        OcrPipelineConfig.setMaxParallelism(context, normalized)
+                    },
+                )
+                Text(
+                    text = stringResource(R.string.ocr_parallelism_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
@@ -226,9 +327,6 @@ private fun WebSocketSettingsPage(onBack: () -> Unit) {
 
     var enabled by remember { mutableStateOf(WebSocketPushConfig.isEnabled(context)) }
     var wsUrl by remember { mutableStateOf(WebSocketPushConfig.getUrl(context)) }
-    var ocrParallelism by remember {
-        mutableStateOf(OcrPipelineConfig.getMaxParallelism(context).toFloat())
-    }
     val localAddresses by produceState(initialValue = emptyList<LocalAddressItem>(), context) {
         value = loadLocalAddresses()
     }
@@ -371,43 +469,6 @@ private fun WebSocketSettingsPage(onBack: () -> Unit) {
             }
         }
 
-        ElevatedCard(
-            shape = RoundedCornerShape(24.dp),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    text = stringResource(R.string.ocr_settings_title),
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                Text(
-                    text = stringResource(R.string.ocr_parallelism_label, ocrParallelism.toInt()),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Slider(
-                    value = ocrParallelism,
-                    onValueChange = { value ->
-                        ocrParallelism = value.roundToInt().toFloat()
-                    },
-                    valueRange = OcrPipelineConfig.MIN_PARALLELISM.toFloat()..OcrPipelineConfig.MAX_PARALLELISM.toFloat(),
-                    steps = OcrPipelineConfig.MAX_PARALLELISM - OcrPipelineConfig.MIN_PARALLELISM - 1,
-                    onValueChangeFinished = {
-                        val normalized = OcrPipelineConfig.normalizeParallelism(ocrParallelism.roundToInt())
-                        ocrParallelism = normalized.toFloat()
-                        OcrPipelineConfig.setMaxParallelism(context, normalized)
-                    },
-                )
-                Text(
-                    text = stringResource(R.string.ocr_parallelism_hint),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
     }
 }
 
