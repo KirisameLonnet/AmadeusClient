@@ -1,7 +1,5 @@
 package com.astramadeus.client
 
-import android.graphics.Bitmap
-
 data class PreviewNode(
     val id: String,
     val text: String,
@@ -25,5 +23,5 @@ data class UiStatePreview(
 data class PreviewVisionSegment(
     val id: String,
     val bounds: android.graphics.Rect,
-    val bitmap: Bitmap,
+    val ocrText: String,
 )

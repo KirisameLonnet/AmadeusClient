@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Rect
 import android.hardware.HardwareBuffer
 import android.os.Build
@@ -15,7 +16,6 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.core.content.ContextCompat
-import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -238,7 +238,7 @@ class AmadeusAccessibilityService : AccessibilityService() {
                 captureSpaceBounds.bottom.coerceIn(0, bitmap.height),
             )
 
-            if (clampedCaptureBounds.width() < MIN_VISION_BOUNDS_SIZE_PX || clampedCaptureBounds.height() < MIN_VISION_BOUNDS_SIZE_PX) {
+            if (clampedCaptureBounds.width() <= 0 || clampedCaptureBounds.height() <= 0) {
                 return@forEach
             }
 
@@ -272,20 +272,17 @@ class AmadeusAccessibilityService : AccessibilityService() {
                 ocrHitCount += 1
             }
 
-            val output = ByteArrayOutputStream()
-            segment.bitmap.compress(Bitmap.CompressFormat.JPEG, VISION_CROP_JPEG_QUALITY, output)
-            segment.bitmap.recycle()
+            val averageColor = sampleAverageColor(segment.bitmap)
 
-            val encoded = android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP)
-            output.close()
+            segment.bitmap.recycle()
 
             segments.put(
                 JSONObject()
                     .put("id", segment.id)
                     .put("bounds", "[${segment.bounds.left},${segment.bounds.top}][${segment.bounds.right},${segment.bounds.bottom}]")
-                    .put("image_base64", encoded)
-                    .put("image_format", "jpeg")
-                    .put("ocr_text", ocrText),
+                    .put("ocr_text", ocrText)
+                    .put("avg_color_rgb", JSONArray().put(averageColor.red).put(averageColor.green).put(averageColor.blue))
+                    .put("avg_color_hex", averageColor.toHexString()),
             )
         }
 
@@ -342,49 +339,120 @@ class AmadeusAccessibilityService : AccessibilityService() {
         return Bitmap.createScaledBitmap(bitmap, width, height, true)
     }
 
+    private fun sampleAverageColor(bitmap: Bitmap): SampledColor {
+        if (bitmap.width <= 0 || bitmap.height <= 0) {
+            return SampledColor(0, 0, 0)
+        }
+
+        val samplePoints = listOf(
+            bitmap.width / 2 to bitmap.height / 2,
+            bitmap.width / 4 to bitmap.height / 4,
+            (bitmap.width * 3) / 4 to bitmap.height / 4,
+            bitmap.width / 4 to (bitmap.height * 3) / 4,
+            (bitmap.width * 3) / 4 to (bitmap.height * 3) / 4,
+        )
+
+        var redSum = 0
+        var greenSum = 0
+        var blueSum = 0
+
+        samplePoints.forEach { (x, y) ->
+            val safeX = x.coerceIn(0, bitmap.width - 1)
+            val safeY = y.coerceIn(0, bitmap.height - 1)
+            val pixel = bitmap.getPixel(safeX, safeY)
+            redSum += Color.red(pixel)
+            greenSum += Color.green(pixel)
+            blueSum += Color.blue(pixel)
+        }
+
+        val count = samplePoints.size.coerceAtLeast(1)
+        return SampledColor(
+            red = redSum / count,
+            green = greenSum / count,
+            blue = blueSum / count,
+        )
+    }
+
     private fun extractVisionTargets(snapshot: JSONObject, rootPackageName: String): List<VisionTarget> {
         val data = snapshot.optJSONObject("data") ?: return emptyList()
         val elements = data.optJSONArray("elements") ?: return emptyList()
         val screenBounds = parseBoundsFromSnapshot(elements) ?: return emptyList()
         val screenArea = screenBounds.width().toLong() * screenBounds.height().toLong()
-        val targets = mutableListOf<VisionTarget>()
+        val nodes = mutableListOf<SnapshotNode>()
         val rejectStats = mutableMapOf(
             VisionRejectReason.NOT_VISIBLE to 0,
             VisionRejectReason.HAS_MEANINGFUL_LABEL to 0,
             VisionRejectReason.NON_VISUAL_OR_NON_ACTIONABLE to 0,
             VisionRejectReason.INVALID_BOUNDS to 0,
-            VisionRejectReason.TOO_SMALL to 0,
             VisionRejectReason.TOO_LARGE to 0,
+            VisionRejectReason.CHILD_PREFERRED to 0,
         )
 
         for (index in 0 until elements.length()) {
             val node = elements.optJSONObject(index) ?: continue
+            val bounds = parseBounds(node.optString("bounds"))
+            if (bounds == null || bounds.width() <= 0 || bounds.height() <= 0) {
+                rejectStats[VisionRejectReason.INVALID_BOUNDS] = rejectStats.getValue(VisionRejectReason.INVALID_BOUNDS) + 1
+                continue
+            }
+
+            nodes += SnapshotNode(
+                id = node.optString("id"),
+                parentId = node.optString("parent_id").takeIf { it.isNotBlank() && it != "null" },
+                bounds = bounds,
+                depth = node.optInt("depth"),
+                childCount = node.optInt("child_count"),
+                className = node.optString("class_name"),
+                isClickable = node.optBoolean("is_clickable"),
+                isScrollable = node.optBoolean("is_scrollable"),
+                isEditable = node.optBoolean("is_editable"),
+                isFocusable = node.optBoolean("is_focusable"),
+                text = node.optString("text"),
+                desc = node.optString("desc"),
+                isVisibleToUser = node.optBoolean("is_visible_to_user", true),
+            )
+        }
+
+        val nodeById = nodes.associateBy { it.id }
+        val candidateNodes = mutableListOf<SnapshotNode>()
+
+        for (node in nodes) {
             val rejectReason = getVisionRejectReason(node)
             if (rejectReason != null) {
                 rejectStats[rejectReason] = rejectStats.getValue(rejectReason) + 1
                 continue
             }
 
-            val bounds = parseBounds(node.optString("bounds"))
-            if (bounds == null) {
-                rejectStats[VisionRejectReason.INVALID_BOUNDS] = rejectStats.getValue(VisionRejectReason.INVALID_BOUNDS) + 1
-                continue
-            }
-
-            if (bounds.width() < MIN_VISION_BOUNDS_SIZE_PX || bounds.height() < MIN_VISION_BOUNDS_SIZE_PX) {
-                rejectStats[VisionRejectReason.TOO_SMALL] = rejectStats.getValue(VisionRejectReason.TOO_SMALL) + 1
-                continue
-            }
-
-            val area = bounds.width().toLong() * bounds.height().toLong()
+            val area = node.bounds.width().toLong() * node.bounds.height().toLong()
             if (screenArea > 0L && area > (screenArea * MAX_VISION_AREA_RATIO).toLong()) {
                 rejectStats[VisionRejectReason.TOO_LARGE] = rejectStats.getValue(VisionRejectReason.TOO_LARGE) + 1
                 continue
             }
 
-            targets += VisionTarget(
-                id = node.optString("id"),
-                bounds = bounds,
+            candidateNodes += node
+        }
+
+        val keptNodes = mutableListOf<SnapshotNode>()
+        candidateNodes
+            .sortedWith(compareBy<SnapshotNode> { it.area() }.thenByDescending { it.depth })
+            .forEach { candidate ->
+                val coveredByChild = keptNodes.any { kept ->
+                    isDescendant(descendantId = kept.id, ancestorId = candidate.id, nodeById = nodeById) &&
+                        intersectionArea(candidate.bounds, kept.bounds) >= kept.area() * MIN_CHILD_COVERAGE_RATIO
+                }
+
+                if (coveredByChild) {
+                    rejectStats[VisionRejectReason.CHILD_PREFERRED] = rejectStats.getValue(VisionRejectReason.CHILD_PREFERRED) + 1
+                    return@forEach
+                }
+
+                keptNodes += candidate
+            }
+
+        val targets = keptNodes.map {
+            VisionTarget(
+                id = it.id,
+                bounds = it.bounds,
             )
         }
 
@@ -431,27 +499,27 @@ class AmadeusAccessibilityService : AccessibilityService() {
         return Rect(minLeft, minTop, maxRight, maxBottom)
     }
 
-    private fun getVisionRejectReason(node: JSONObject): VisionRejectReason? {
-        if (!node.optBoolean("is_visible_to_user", true)) {
+    private fun getVisionRejectReason(node: SnapshotNode): VisionRejectReason? {
+        if (!node.isVisibleToUser) {
             return VisionRejectReason.NOT_VISIBLE
         }
 
-        val text = node.optString("text")
-        val desc = node.optString("desc")
+        val text = node.text
+        val desc = node.desc
         if (hasMeaningfulLabel(text) || hasMeaningfulLabel(desc)) {
             return VisionRejectReason.HAS_MEANINGFUL_LABEL
         }
 
-        val className = node.optString("class_name")
+        val className = node.className
         val isViewLikeClass = className.contains("View", ignoreCase = true) ||
             className.contains("Layout", ignoreCase = true)
         val isVisualClass = className.contains("Image", ignoreCase = true) ||
             className.contains("Icon", ignoreCase = true) ||
             className.contains("WebView", ignoreCase = true)
-        val isActionableWithoutLabel = node.optBoolean("is_clickable") ||
-            node.optBoolean("is_scrollable") ||
-            node.optBoolean("is_editable") ||
-            node.optBoolean("is_focusable")
+        val isActionableWithoutLabel = node.isClickable ||
+            node.isScrollable ||
+            node.isEditable ||
+            node.isFocusable
 
         if (!isVisualClass && !(isViewLikeClass && isActionableWithoutLabel)) {
             return VisionRejectReason.NON_VISUAL_OR_NON_ACTIONABLE
@@ -477,10 +545,10 @@ class AmadeusAccessibilityService : AccessibilityService() {
             append(rejectStats.getValue(VisionRejectReason.NON_VISUAL_OR_NON_ACTIONABLE))
             append(", invalid_bounds=")
             append(rejectStats.getValue(VisionRejectReason.INVALID_BOUNDS))
-            append(", too_small=")
-            append(rejectStats.getValue(VisionRejectReason.TOO_SMALL))
             append(", too_large=")
             append(rejectStats.getValue(VisionRejectReason.TOO_LARGE))
+            append(", child_preferred=")
+            append(rejectStats.getValue(VisionRejectReason.CHILD_PREFERRED))
         }
 
         val sampleSummary = if (sampleTargets.isEmpty()) {
@@ -528,6 +596,32 @@ class AmadeusAccessibilityService : AccessibilityService() {
             bounds.right - captureWindowBounds.left,
             bounds.bottom - captureWindowBounds.top,
         )
+    }
+
+    private fun isDescendant(
+        descendantId: String,
+        ancestorId: String,
+        nodeById: Map<String, SnapshotNode>,
+    ): Boolean {
+        var currentId = nodeById[descendantId]?.parentId
+        while (!currentId.isNullOrBlank()) {
+            if (currentId == ancestorId) {
+                return true
+            }
+            currentId = nodeById[currentId]?.parentId
+        }
+        return false
+    }
+
+    private fun intersectionArea(first: Rect, second: Rect): Long {
+        val left = maxOf(first.left, second.left)
+        val top = maxOf(first.top, second.top)
+        val right = minOf(first.right, second.right)
+        val bottom = minOf(first.bottom, second.bottom)
+        if (right <= left || bottom <= top) {
+            return 0L
+        }
+        return (right - left).toLong() * (bottom - top).toLong()
     }
 
     private fun resolveCaptureWindow(rootPackageName: String): CaptureWindow? {
@@ -702,11 +796,39 @@ class AmadeusAccessibilityService : AccessibilityService() {
         val bounds: Rect,
     )
 
+    private data class SnapshotNode(
+        val id: String,
+        val parentId: String?,
+        val bounds: Rect,
+        val depth: Int,
+        val childCount: Int,
+        val className: String,
+        val isClickable: Boolean,
+        val isScrollable: Boolean,
+        val isEditable: Boolean,
+        val isFocusable: Boolean,
+        val text: String = "",
+        val desc: String = "",
+        val isVisibleToUser: Boolean = true,
+    ) {
+        fun area(): Long = bounds.width().toLong() * bounds.height().toLong()
+    }
+
     private data class PreparedVisionSegment(
         val id: String,
         val bounds: Rect,
         val bitmap: Bitmap,
     )
+
+    private data class SampledColor(
+        val red: Int,
+        val green: Int,
+        val blue: Int,
+    ) {
+        fun toHexString(): String {
+            return String.format("#%02X%02X%02X", red, green, blue)
+        }
+    }
 
     private data class CaptureWindow(
         val windowId: Int,
@@ -718,18 +840,17 @@ class AmadeusAccessibilityService : AccessibilityService() {
         HAS_MEANINGFUL_LABEL,
         NON_VISUAL_OR_NON_ACTIONABLE,
         INVALID_BOUNDS,
-        TOO_SMALL,
         TOO_LARGE,
+        CHILD_PREFERRED,
     }
 
     companion object {
         private const val TAG = "AmadeusAccessibility"
         private const val FORCED_REPEAT_MIN_INTERVAL_MS = 2_500L
         private const val VISION_CROP_MAX_EDGE_PX = 1080
-        private const val VISION_CROP_JPEG_QUALITY = 88
-        private const val MIN_VISION_BOUNDS_SIZE_PX = 24
         private const val MAX_VISION_SEGMENTS = 64
         private const val MAX_VISION_AREA_RATIO = 0.35
+        private const val MIN_CHILD_COVERAGE_RATIO = 0.6f
         private const val VISION_FILTER_LOG_SAMPLE_COUNT = 8
         private const val OCR_TASK_TIMEOUT_MS = 1_200L
         private const val REQUEST_EVENT_TYPE = "TYPE_SNAPSHOT_REQUESTED"

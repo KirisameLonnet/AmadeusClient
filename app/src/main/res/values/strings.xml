@@ -12,6 +12,9 @@
     <string name="waiting_for_snapshot">No UI snapshot yet. Enable the accessibility service and switch apps to start capturing.</string>
     <string name="preview_parse_failed">Unable to parse the latest ui_state snapshot.</string>
     <string name="preview_ready">Rendering latest ui_state preview.</string>
+    <string name="preview_building_first_frame">Building first preview frame...</string>
+    <string name="preview_building_next_frame">Building next frame. Keeping last preview visible.</string>
+    <string name="preview_showing_last_frame">Latest frame build not ready. Showing previous preview frame.</string>
     <string name="preview_controls_title">Preview controls</string>
     <string name="preview_toggle_mosaic">Show ui mosaic</string>
     <string name="preview_toggle_nodes">Show node overlay</string>

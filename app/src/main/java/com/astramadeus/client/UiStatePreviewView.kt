@@ -131,7 +131,7 @@ class UiStatePreviewView @JvmOverloads constructor(
                 }
 
                 val rect = RectF(left, top, right, bottom)
-                canvas.drawBitmap(segment.bitmap, null, rect, null)
+                canvas.drawRoundRect(rect, 8f, 8f, nodePaint)
                 canvas.drawRoundRect(rect, 8f, 8f, visionSegmentBorderPaint)
             }
         }

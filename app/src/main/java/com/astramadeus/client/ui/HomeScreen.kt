@@ -29,12 +29,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.astramadeus.client.PreviewControlsConfig
-import com.astramadeus.client.PreviewVisionSegment
 import com.astramadeus.client.R
 import com.astramadeus.client.UiStateParser
 import com.astramadeus.client.UiStatePreview
 import com.astramadeus.client.UiStatePreviewView
-import com.astramadeus.client.VisionOcrProcessor
 import java.util.Locale
 import kotlinx.coroutines.launch
 
@@ -63,14 +61,18 @@ fun HomeScreen(
 
     var latestSnapshotId by remember { mutableStateOf<String?>(null) }
     var renderedFrame by remember { mutableStateOf<ProcessedPreviewFrame?>(null) }
+    var previewFrameStatus by remember { mutableStateOf(PreviewFrameStatus.IDLE) }
     val inFlightSnapshotIds = remember { mutableSetOf<String>() }
-    val ocrCacheBySegment = remember { mutableMapOf<String, String>() }
 
     LaunchedEffect(latestSnapshot) {
         val rawSnapshot = latestSnapshot
         if (rawSnapshot.isNullOrBlank()) {
             latestSnapshotId = null
-            renderedFrame = null
+            previewFrameStatus = if (renderedFrame == null) {
+                PreviewFrameStatus.IDLE
+            } else {
+                PreviewFrameStatus.SHOWING_LAST_FRAME
+            }
             return@LaunchedEffect
         }
 
@@ -80,57 +82,48 @@ fun HomeScreen(
             return@LaunchedEffect
         }
 
+        previewFrameStatus = if (renderedFrame == null) {
+            PreviewFrameStatus.BUILDING_FIRST_FRAME
+        } else {
+            PreviewFrameStatus.BUILDING_NEXT_FRAME
+        }
         inFlightSnapshotIds += snapshotId
         scope.launch {
             val preview = UiStateParser.parse(rawSnapshot)
             if (preview == null) {
                 inFlightSnapshotIds -= snapshotId
                 if (latestSnapshotId == snapshotId) {
-                    renderedFrame = ProcessedPreviewFrame(snapshotId, null, emptyMap())
+                    previewFrameStatus = if (renderedFrame == null) {
+                        PreviewFrameStatus.PARSE_FAILED
+                    } else {
+                        PreviewFrameStatus.SHOWING_LAST_FRAME
+                    }
                 }
                 return@launch
             }
-
-            val segmentById = preview.visionSegments.associateBy { it.id }
-            val pendingSegments = preview.visionSegments.filter { segment ->
-                ocrCacheBySegment[segmentCacheKey(preview.packageName, segment)].isNullOrBlank()
-            }
-
-            val recognized = if (pendingSegments.isEmpty()) {
-                emptyMap()
-            } else {
-                VisionOcrProcessor.recognizeSegments(
-                    packageName = preview.packageName,
-                    segments = pendingSegments,
-                )
-            }
-
-            recognized.forEach { (id, text) ->
-                val segment = segmentById[id] ?: return@forEach
-                ocrCacheBySegment[segmentCacheKey(preview.packageName, segment)] = text
-            }
-
-            val mergedResults = preview.visionSegments.mapNotNull { segment ->
-                val value = ocrCacheBySegment[segmentCacheKey(preview.packageName, segment)]
-                    ?: return@mapNotNull null
-                segment.id to value
-            }.toMap()
+            val mergedResults = preview.visionSegments
+                .mapNotNull { segment ->
+                    segment.ocrText.takeIf { it.isNotBlank() }?.let { segment.id to it }
+                }
+                .toMap()
 
             inFlightSnapshotIds -= snapshotId
             if (latestSnapshotId == snapshotId) {
                 renderedFrame = ProcessedPreviewFrame(snapshotId, preview, mergedResults)
+                previewFrameStatus = PreviewFrameStatus.READY
             }
         }
     }
 
     val parsedPreview = renderedFrame?.preview
     val visionOcrResults = renderedFrame?.ocrResults.orEmpty()
-    val isWaitingForCurrentFrame = latestSnapshotId != null && renderedFrame?.snapshotId != latestSnapshotId
 
     val snapshotHint = when {
-        latestSnapshot.isNullOrBlank() -> androidx.compose.ui.res.stringResource(R.string.waiting_for_snapshot)
-        isWaitingForCurrentFrame -> androidx.compose.ui.res.stringResource(R.string.preview_ready)
-        parsedPreview == null -> androidx.compose.ui.res.stringResource(R.string.preview_parse_failed)
+        previewFrameStatus == PreviewFrameStatus.IDLE -> androidx.compose.ui.res.stringResource(R.string.waiting_for_snapshot)
+        previewFrameStatus == PreviewFrameStatus.BUILDING_FIRST_FRAME -> androidx.compose.ui.res.stringResource(R.string.preview_building_first_frame)
+        previewFrameStatus == PreviewFrameStatus.BUILDING_NEXT_FRAME -> androidx.compose.ui.res.stringResource(R.string.preview_building_next_frame)
+        previewFrameStatus == PreviewFrameStatus.PARSE_FAILED -> androidx.compose.ui.res.stringResource(R.string.preview_parse_failed)
+        previewFrameStatus == PreviewFrameStatus.SHOWING_LAST_FRAME -> androidx.compose.ui.res.stringResource(R.string.preview_showing_last_frame)
         else -> androidx.compose.ui.res.stringResource(R.string.preview_ready)
     }
 
@@ -272,10 +265,6 @@ fun HomeScreen(
     }
 }
 
-private fun segmentCacheKey(packageName: String, segment: PreviewVisionSegment): String {
-    return "$packageName:${segment.bounds.left},${segment.bounds.top},${segment.bounds.right},${segment.bounds.bottom}"
-}
-
 private fun String.toStableSnapshotId(): String {
     return hashCode().toUInt().toString(16)
 }
@@ -285,6 +274,15 @@ private data class ProcessedPreviewFrame(
     val preview: UiStatePreview?,
     val ocrResults: Map<String, String>,
 )
+
+private enum class PreviewFrameStatus {
+    IDLE,
+    BUILDING_FIRST_FRAME,
+    BUILDING_NEXT_FRAME,
+    READY,
+    SHOWING_LAST_FRAME,
+    PARSE_FAILED,
+}
 
 @Composable
 private fun PreviewToggleRow(
