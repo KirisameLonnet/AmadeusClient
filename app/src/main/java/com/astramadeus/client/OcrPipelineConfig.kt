@@ -7,8 +7,8 @@ object OcrPipelineConfig {
     private const val KEY_MAX_PARALLELISM = "max_parallelism"
 
     const val MIN_PARALLELISM = 1
-    const val MAX_PARALLELISM = 8
-    const val DEFAULT_PARALLELISM = 3
+    const val MAX_PARALLELISM = 32
+    const val DEFAULT_PARALLELISM = 32
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

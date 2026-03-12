@@ -36,7 +36,7 @@
     <string name="websocket_local_ips_empty">No active non-loopback interface found.</string>
     <string name="ocr_settings_title">OCR pipeline settings</string>
     <string name="ocr_parallelism_label">OCR parallelism: %1$d</string>
-    <string name="ocr_parallelism_hint">Higher values increase throughput but may raise heat and jitter. Recommended 3-4 on Snapdragon 8 Gen 2.</string>
+    <string name="ocr_parallelism_hint">Higher values increase throughput but may raise heat and jitter. Current range supports up to 32.</string>
     <string name="vision_assist_selected_count">%1$d selected</string>
     <string name="vision_assist_menu">Vision assist options</string>
     <string name="sort_app_name_asc">Sort: App name A-Z</string>
