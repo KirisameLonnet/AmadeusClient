@@ -2,6 +2,18 @@
 
 AmadeusClient 是 AstrBot 用于控制安卓手机的客户端应用。
 
+## 关联仓库
+
+- Android 客户端：`AmadeusClient`
+  - 仓库地址：`https://github.com/KirisameLonnet/AmadeusClient`
+- AstrBot 插件：`astrbot_plugin_Amadeus`
+  - 仓库地址：`https://github.com/KirisameLonnet/astrbot_plugin_Amadeus`
+
+两个仓库分工如下：
+
+1. `AmadeusClient` 运行在安卓手机上，负责页面感知、截图增强、OCR 与结构化帧生成。
+2. `astrbot_plugin_Amadeus` 运行在 AstrBot 侧，负责接收页面帧，并通过工具与 ADB 让 Agent 控制手机。
+
 ## 项目状态
 
 本项目仍在持续开发中。
@@ -40,7 +52,7 @@ AmadeusClient 运行在安卓物理机上，核心职责是执行设备侧能力
 3. 对低可访问性区域执行截图裁剪与 OCR，补齐缺失文本。
 4. 将 OCR 结果、颜色信息与节点结构合并，生成精简后的传输帧。
 5. 通过 WebSocket 将页面帧发送给上游 AstrBot / 插件侧服务端。
-6. 后续由 AstrBot 回传动作指令，客户端负责执行。
+6. 当前动作主要由 `astrbot_plugin_Amadeus` 通过 ADB 回写，后续再逐步补齐客户端内建动作执行链路。
 
 ## 当前帧特性
 
