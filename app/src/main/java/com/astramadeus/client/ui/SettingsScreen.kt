@@ -114,11 +114,6 @@ private fun SettingsMainPage(
     onOpenVisionApps: () -> Unit,
     onOpenWebSocket: () -> Unit,
 ) {
-    val context = LocalContext.current
-    var ocrParallelism by remember {
-        mutableStateOf(OcrPipelineConfig.getMaxParallelism(context).toFloat())
-    }
-
     val serviceStatus = if (serviceEnabled) {
         stringResource(R.string.service_status_enabled)
     } else {
@@ -231,6 +226,9 @@ private fun WebSocketSettingsPage(onBack: () -> Unit) {
 
     var enabled by remember { mutableStateOf(WebSocketPushConfig.isEnabled(context)) }
     var wsUrl by remember { mutableStateOf(WebSocketPushConfig.getUrl(context)) }
+    var ocrParallelism by remember {
+        mutableStateOf(OcrPipelineConfig.getMaxParallelism(context).toFloat())
+    }
     val localAddresses by produceState(initialValue = emptyList<LocalAddressItem>(), context) {
         value = loadLocalAddresses()
     }
