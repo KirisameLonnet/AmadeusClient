@@ -47,8 +47,10 @@ val items = listOf(
 fun MainApp(
     serviceEnabled: Boolean,
     latestSnapshot: String?,
+    maxPullRateHz: Float,
     onOpenAccessibilitySettings: () -> Unit,
     onRefreshStatus: () -> Unit,
+    onUpdateMaxPullRateHz: (Float) -> Unit,
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -102,6 +104,8 @@ fun MainApp(
             composable(Screen.Home.route) {
                 HomeScreen(
                     latestSnapshot = latestSnapshot,
+                    maxPullRateHz = maxPullRateHz,
+                    onUpdateMaxPullRateHz = onUpdateMaxPullRateHz,
                 )
             }
             composable(Screen.Settings.route) {

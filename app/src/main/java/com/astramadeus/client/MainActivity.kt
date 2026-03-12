@@ -23,14 +23,17 @@ import java.util.TimerTask
 class MainActivity : ComponentActivity() {
 
     private val snapshotExpiryMs = 5_000L
-    private val statusRefreshIntervalMs = 2000L // 每2秒刷新一次状态
-    private val snapshotRequestMinIntervalMs = 1500L
+    private var statusRefreshIntervalMs = 1000L
+    private var snapshotRequestMinIntervalMs = 1000L
 
     private val _serviceEnabled = MutableStateFlow(false)
     val serviceEnabled: StateFlow<Boolean> = _serviceEnabled.asStateFlow()
 
     private val _latestSnapshot = MutableStateFlow<String?>(null)
     val latestSnapshot: StateFlow<String?> = _latestSnapshot.asStateFlow()
+
+    private val _maxPullRateHz = MutableStateFlow(1.0f)
+    val maxPullRateHz: StateFlow<Float> = _maxPullRateHz.asStateFlow()
 
     private var statusTimer: Timer? = null
     private var lastSnapshotRequestAt: Long = 0L
@@ -50,17 +53,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        syncRateSettingsFromConfig()
         enableEdgeToEdge()
         setContent {
             val serviceEnabledState by serviceEnabled.collectAsState()
             val latestSnapshotState by latestSnapshot.collectAsState()
+            val maxPullRateHzState by maxPullRateHz.collectAsState()
 
             AmadeusTheme {
                 MainApp(
                     serviceEnabled = serviceEnabledState,
                     latestSnapshot = latestSnapshotState,
+                    maxPullRateHz = maxPullRateHzState,
                     onOpenAccessibilitySettings = ::openAccessibilitySettings,
                     onRefreshStatus = ::refreshStatus,
+                    onUpdateMaxPullRateHz = ::updateMaxPullRateHz,
                 )
             }
         }
@@ -81,6 +88,7 @@ class MainActivity : ComponentActivity() {
         )
 
         // 启动定时状态检查
+        syncRateSettingsFromConfig()
         startStatusTimer()
         
         _serviceEnabled.value = SnapshotBroadcasts.latestServiceEnabled || isAccessibilityServiceEnabled()
@@ -108,6 +116,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshStatus() {
+        syncRateSettingsFromConfig()
         _serviceEnabled.value = SnapshotBroadcasts.latestServiceEnabled || isAccessibilityServiceEnabled()
         _latestSnapshot.value = SnapshotBroadcasts.getLatestSnapshot(snapshotExpiryMs)
 
@@ -118,6 +127,21 @@ class MainActivity : ComponentActivity() {
                 lastSnapshotRequestAt = now
             }
         }
+    }
+
+    private fun updateMaxPullRateHz(rateHz: Float) {
+        val normalizedRate = PreviewControlsConfig.normalizeRate(rateHz)
+        PreviewControlsConfig.setMaxPullRateHz(this, normalizedRate)
+        syncRateSettingsFromConfig()
+        startStatusTimer()
+    }
+
+    private fun syncRateSettingsFromConfig() {
+        val configuredRate = PreviewControlsConfig.getMaxPullRateHz(this)
+        _maxPullRateHz.value = configuredRate
+        val intervalMs = PreviewControlsConfig.toIntervalMs(configuredRate)
+        statusRefreshIntervalMs = intervalMs
+        snapshotRequestMinIntervalMs = intervalMs
     }
 
     private fun startStatusTimer() {

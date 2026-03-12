@@ -12,6 +12,11 @@
     <string name="waiting_for_snapshot">No UI snapshot yet. Enable the accessibility service and switch apps to start capturing.</string>
     <string name="preview_parse_failed">Unable to parse the latest ui_state snapshot.</string>
     <string name="preview_ready">Rendering latest ui_state preview.</string>
+    <string name="preview_controls_title">Preview controls</string>
+    <string name="preview_toggle_mosaic">Show ui mosaic</string>
+    <string name="preview_toggle_nodes">Show node overlay</string>
+    <string name="preview_toggle_ocr">Show OCR overlay</string>
+    <string name="preview_rate_title">Capture max rate: %1$s</string>
     <string name="received_ui_state_label">Received ui_state info</string>
     <string name="vision_assist_apps_title">Vision assist apps</string>
     <string name="vision_assist_entry_title">Vision assist app list</string>

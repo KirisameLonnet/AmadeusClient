@@ -72,7 +72,8 @@ class AmadeusAccessibilityService : AccessibilityService() {
 
     private fun captureAndPublishSnapshot(event: AccessibilityEvent?, force: Boolean) {
         val now = System.currentTimeMillis()
-        if (!force && now - lastSnapshotAt < SNAPSHOT_DEBOUNCE_MS) {
+        val debounceMs = PreviewControlsConfig.toIntervalMs(PreviewControlsConfig.getMaxPullRateHz(this))
+        if (!force && now - lastSnapshotAt < debounceMs) {
             return
         }
 
@@ -103,7 +104,7 @@ class AmadeusAccessibilityService : AccessibilityService() {
             return
         }
 
-        val visionTargets = extractVisionTargets(snapshot)
+        val visionTargets = extractVisionTargets(snapshot, rootPackageName)
         val captureWindow = resolveCaptureWindow(rootPackageName)
         val shouldCaptureVision =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
@@ -268,26 +269,43 @@ class AmadeusAccessibilityService : AccessibilityService() {
         return Bitmap.createScaledBitmap(bitmap, width, height, true)
     }
 
-    private fun extractVisionTargets(snapshot: JSONObject): List<VisionTarget> {
+    private fun extractVisionTargets(snapshot: JSONObject, rootPackageName: String): List<VisionTarget> {
         val data = snapshot.optJSONObject("data") ?: return emptyList()
         val elements = data.optJSONArray("elements") ?: return emptyList()
         val screenBounds = parseBoundsFromSnapshot(elements) ?: return emptyList()
         val screenArea = screenBounds.width().toLong() * screenBounds.height().toLong()
         val targets = mutableListOf<VisionTarget>()
+        val rejectStats = mutableMapOf(
+            VisionRejectReason.NOT_VISIBLE to 0,
+            VisionRejectReason.HAS_MEANINGFUL_LABEL to 0,
+            VisionRejectReason.NON_VISUAL_OR_NON_ACTIONABLE to 0,
+            VisionRejectReason.INVALID_BOUNDS to 0,
+            VisionRejectReason.TOO_SMALL to 0,
+            VisionRejectReason.TOO_LARGE to 0,
+        )
 
         for (index in 0 until elements.length()) {
             val node = elements.optJSONObject(index) ?: continue
-            if (!shouldCaptureVisionForNode(node)) {
+            val rejectReason = getVisionRejectReason(node)
+            if (rejectReason != null) {
+                rejectStats[rejectReason] = rejectStats.getValue(rejectReason) + 1
                 continue
             }
 
-            val bounds = parseBounds(node.optString("bounds")) ?: continue
+            val bounds = parseBounds(node.optString("bounds"))
+            if (bounds == null) {
+                rejectStats[VisionRejectReason.INVALID_BOUNDS] = rejectStats.getValue(VisionRejectReason.INVALID_BOUNDS) + 1
+                continue
+            }
+
             if (bounds.width() < MIN_VISION_BOUNDS_SIZE_PX || bounds.height() < MIN_VISION_BOUNDS_SIZE_PX) {
+                rejectStats[VisionRejectReason.TOO_SMALL] = rejectStats.getValue(VisionRejectReason.TOO_SMALL) + 1
                 continue
             }
 
             val area = bounds.width().toLong() * bounds.height().toLong()
             if (screenArea > 0L && area > (screenArea * MAX_VISION_AREA_RATIO).toLong()) {
+                rejectStats[VisionRejectReason.TOO_LARGE] = rejectStats.getValue(VisionRejectReason.TOO_LARGE) + 1
                 continue
             }
 
@@ -297,13 +315,25 @@ class AmadeusAccessibilityService : AccessibilityService() {
             )
         }
 
-        if (targets.size > MAX_VISION_SEGMENTS) {
-            return targets
+        val finalTargets = if (targets.size > MAX_VISION_SEGMENTS) {
+            targets
                 .sortedBy { it.bounds.width().toLong() * it.bounds.height().toLong() }
                 .take(MAX_VISION_SEGMENTS)
+        } else {
+            targets
         }
 
-        return targets
+        val trimmed = targets.size - finalTargets.size
+        logVisionFilterStats(
+            packageName = rootPackageName,
+            totalNodes = elements.length(),
+            selected = finalTargets.size,
+            trimmed = trimmed,
+            rejectStats = rejectStats,
+            sampleTargets = finalTargets.take(VISION_FILTER_LOG_SAMPLE_COUNT),
+        )
+
+        return finalTargets
     }
 
     private fun parseBoundsFromSnapshot(elements: JSONArray): Rect? {
@@ -328,15 +358,15 @@ class AmadeusAccessibilityService : AccessibilityService() {
         return Rect(minLeft, minTop, maxRight, maxBottom)
     }
 
-    private fun shouldCaptureVisionForNode(node: JSONObject): Boolean {
+    private fun getVisionRejectReason(node: JSONObject): VisionRejectReason? {
         if (!node.optBoolean("is_visible_to_user", true)) {
-            return false
+            return VisionRejectReason.NOT_VISIBLE
         }
 
         val text = node.optString("text")
         val desc = node.optString("desc")
         if (hasMeaningfulLabel(text) || hasMeaningfulLabel(desc)) {
-            return false
+            return VisionRejectReason.HAS_MEANINGFUL_LABEL
         }
 
         val className = node.optString("class_name")
@@ -350,7 +380,50 @@ class AmadeusAccessibilityService : AccessibilityService() {
             node.optBoolean("is_editable") ||
             node.optBoolean("is_focusable")
 
-        return isVisualClass || (isViewLikeClass && isActionableWithoutLabel)
+        if (!isVisualClass && !(isViewLikeClass && isActionableWithoutLabel)) {
+            return VisionRejectReason.NON_VISUAL_OR_NON_ACTIONABLE
+        }
+
+        return null
+    }
+
+    private fun logVisionFilterStats(
+        packageName: String,
+        totalNodes: Int,
+        selected: Int,
+        trimmed: Int,
+        rejectStats: Map<VisionRejectReason, Int>,
+        sampleTargets: List<VisionTarget>,
+    ) {
+        val rejectSummary = buildString {
+            append("not_visible=")
+            append(rejectStats.getValue(VisionRejectReason.NOT_VISIBLE))
+            append(", has_label=")
+            append(rejectStats.getValue(VisionRejectReason.HAS_MEANINGFUL_LABEL))
+            append(", non_visual_or_non_actionable=")
+            append(rejectStats.getValue(VisionRejectReason.NON_VISUAL_OR_NON_ACTIONABLE))
+            append(", invalid_bounds=")
+            append(rejectStats.getValue(VisionRejectReason.INVALID_BOUNDS))
+            append(", too_small=")
+            append(rejectStats.getValue(VisionRejectReason.TOO_SMALL))
+            append(", too_large=")
+            append(rejectStats.getValue(VisionRejectReason.TOO_LARGE))
+        }
+
+        val sampleSummary = if (sampleTargets.isEmpty()) {
+            "none"
+        } else {
+            sampleTargets.joinToString(separator = " | ") { target ->
+                val width = target.bounds.width()
+                val height = target.bounds.height()
+                "${target.id}:${target.bounds.left},${target.bounds.top},${width}x${height}"
+            }
+        }
+
+        Log.d(
+            TAG,
+            "Vision filter package=$packageName total_nodes=$totalNodes selected=$selected trimmed=$trimmed rejects={$rejectSummary} sample={$sampleSummary}",
+        )
     }
 
     private fun hasMeaningfulLabel(value: String): Boolean {
@@ -561,15 +634,24 @@ class AmadeusAccessibilityService : AccessibilityService() {
         val boundsInScreen: Rect,
     )
 
+    private enum class VisionRejectReason {
+        NOT_VISIBLE,
+        HAS_MEANINGFUL_LABEL,
+        NON_VISUAL_OR_NON_ACTIONABLE,
+        INVALID_BOUNDS,
+        TOO_SMALL,
+        TOO_LARGE,
+    }
+
     companion object {
         private const val TAG = "AmadeusAccessibility"
-        private const val SNAPSHOT_DEBOUNCE_MS = 350L
         private const val FORCED_REPEAT_MIN_INTERVAL_MS = 2_500L
         private const val VISION_CROP_MAX_EDGE_PX = 1080
         private const val VISION_CROP_JPEG_QUALITY = 88
         private const val MIN_VISION_BOUNDS_SIZE_PX = 24
         private const val MAX_VISION_SEGMENTS = 64
         private const val MAX_VISION_AREA_RATIO = 0.35
+        private const val VISION_FILTER_LOG_SAMPLE_COUNT = 8
         private const val REQUEST_EVENT_TYPE = "TYPE_SNAPSHOT_REQUESTED"
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
     }
