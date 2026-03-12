@@ -1,5 +1,10 @@
 package com.astramadeus.client.ui
 
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
+import android.widget.ImageView
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,105 +13,384 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.astramadeus.client.R
+import com.astramadeus.client.VisionAssistConfig
+
+private enum class SettingsPage {
+    Main,
+    VisionApps,
+}
+
+private data class InstalledAppItem(
+    val appName: String,
+    val packageName: String,
+    val icon: Drawable,
+    val isSystemApp: Boolean,
+)
 
 @Composable
-fun SettingsScreen() {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
-        SettingsCard(
-            title = "General Settings",
-            items = listOf(
-                SettingItemData("Enable Notifications", "Receive push notifications"),
-                SettingItemData("Dark Mode", "Use dark theme across the app")
-            )
+fun SettingsScreen(
+    serviceEnabled: Boolean,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRefresh: () -> Unit,
+) {
+    var page by rememberSaveable { mutableStateOf(SettingsPage.Main) }
+
+    when (page) {
+        SettingsPage.Main -> SettingsMainPage(
+            serviceEnabled = serviceEnabled,
+            onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+            onRefresh = onRefresh,
+            onOpenVisionApps = { page = SettingsPage.VisionApps },
         )
-        Spacer(modifier = Modifier.height(16.dp))
-        SettingsCard(
-            title = "Privacy",
-            items = listOf(
-                SettingItemData("Share Analytics", "Help us improve the app by sharing anonymous data"),
-                SettingItemData("Location Services", "Allow app to access your location")
-            )
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        SettingsCard(
-            title = "Advanced",
-            items = listOf(
-                SettingItemData("Developer Mode", "Enable advanced debugging features"),
-                SettingItemData("Experimental Features", "Try out new features before they are released")
-            )
-        )
+
+        SettingsPage.VisionApps -> VisionAssistAppsPage(onBack = { page = SettingsPage.Main })
     }
 }
 
-data class SettingItemData(val title: String, val subtitle: String)
-
 @Composable
-fun SettingsCard(title: String, items: List<SettingItemData>) {
-    ElevatedCard(
-        shape = RoundedCornerShape(24.dp),
-        modifier = Modifier.fillMaxWidth()
+private fun SettingsMainPage(
+    serviceEnabled: Boolean,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenVisionApps: () -> Unit,
+) {
+    val serviceStatus = if (serviceEnabled) {
+        stringResource(R.string.service_status_enabled)
+    } else {
+        stringResource(R.string.service_status_disabled)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp)
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
         ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(bottom = 16.dp, start = 8.dp)
-            )
-            items.forEach { item ->
-                SettingItem(item.title, item.subtitle)
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = stringResource(R.string.service_status_label),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = serviceStatus,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (serviceEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row {
+                    Button(onClick = onOpenAccessibilitySettings) {
+                        Text(text = stringResource(R.string.open_accessibility_settings))
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    FilledIconButton(onClick = onRefresh) {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = stringResource(R.string.refresh_status),
+                        )
+                    }
+                }
+            }
+        }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenVisionApps)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.vision_assist_entry_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = stringResource(R.string.vision_assist_entry_subtitle),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = stringResource(R.string.vision_assist_entry_title),
+                )
             }
         }
     }
 }
 
 @Composable
-fun SettingItem(title: String, subtitle: String) {
-    var checked by remember { mutableStateOf(false) }
+private fun VisionAssistAppsPage(onBack: () -> Unit) {
+    val context = LocalContext.current
 
-    Row(
+    var searchQuery by remember { mutableStateOf("") }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showSystemApps by remember { mutableStateOf(VisionAssistConfig.getShowSystemApps(context)) }
+    var sortMode by remember { mutableStateOf(VisionAssistConfig.getSortMode(context)) }
+    var enabledPackages by remember { mutableStateOf(VisionAssistConfig.getEnabledPackages(context)) }
+
+    val allApps by produceState(initialValue = emptyList<InstalledAppItem>(), context) {
+        value = loadInstalledApps(context.packageManager)
+    }
+
+    val filteredApps = remember(allApps, searchQuery, showSystemApps, sortMode, enabledPackages) {
+        allApps
+            .asSequence()
+            .filter { app -> showSystemApps || !app.isSystemApp }
+            .filter { app ->
+                if (searchQuery.isBlank()) {
+                    true
+                } else {
+                    val query = searchQuery.trim()
+                    app.appName.contains(query, ignoreCase = true) ||
+                        app.packageName.contains(query, ignoreCase = true)
+                }
+            }
+            .sortedWith(sortComparator(sortMode, enabledPackages))
+            .toList()
+    }
+
+    Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+            .fillMaxSize()
+            .padding(horizontal = 16.dp),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyLarge
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.back),
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.vision_assist_apps_title),
+                    style = MaterialTheme.typography.titleLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = stringResource(R.string.vision_assist_selected_count, enabledPackages.size),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                IconButton(onClick = { menuExpanded = true }) {
+                    Icon(
+                        imageVector = Icons.Filled.MoreVert,
+                        contentDescription = stringResource(R.string.vision_assist_menu),
+                    )
+                }
+            }
+        }
+
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sort_app_name_asc)) },
+                leadingIcon = {
+                    if (sortMode == VisionAssistConfig.SORT_APP_NAME_ASC) {
+                        Icon(Icons.Filled.Check, contentDescription = null)
+                    }
+                },
+                onClick = {
+                    sortMode = VisionAssistConfig.SORT_APP_NAME_ASC
+                    VisionAssistConfig.setSortMode(context, sortMode)
+                    menuExpanded = false
+                },
             )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sort_app_name_desc)) },
+                leadingIcon = {
+                    if (sortMode == VisionAssistConfig.SORT_APP_NAME_DESC) {
+                        Icon(Icons.Filled.Check, contentDescription = null)
+                    }
+                },
+                onClick = {
+                    sortMode = VisionAssistConfig.SORT_APP_NAME_DESC
+                    VisionAssistConfig.setSortMode(context, sortMode)
+                    menuExpanded = false
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sort_package_asc)) },
+                leadingIcon = {
+                    if (sortMode == VisionAssistConfig.SORT_PACKAGE_ASC) {
+                        Icon(Icons.Filled.Check, contentDescription = null)
+                    }
+                },
+                onClick = {
+                    sortMode = VisionAssistConfig.SORT_PACKAGE_ASC
+                    VisionAssistConfig.setSortMode(context, sortMode)
+                    menuExpanded = false
+                },
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = if (showSystemApps) {
+                            stringResource(R.string.hide_system_apps)
+                        } else {
+                            stringResource(R.string.show_system_apps)
+                        },
+                    )
+                },
+                onClick = {
+                    showSystemApps = !showSystemApps
+                    VisionAssistConfig.setShowSystemApps(context, showSystemApps)
+                    menuExpanded = false
+                },
             )
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = { checked = it }
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text(stringResource(R.string.search_apps_label)) },
+            placeholder = { Text(stringResource(R.string.search_apps_placeholder)) },
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            items(filteredApps, key = { it.packageName }) { app ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AndroidView(
+                        factory = { ctx -> ImageView(ctx) },
+                        update = { view -> view.setImageDrawable(app.icon) },
+                        modifier = Modifier.size(36.dp),
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = app.appName,
+                            style = MaterialTheme.typography.bodyLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = app.packageName,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Checkbox(
+                        checked = enabledPackages.contains(app.packageName),
+                        onCheckedChange = { checked ->
+                            VisionAssistConfig.setPackageEnabled(context, app.packageName, checked)
+                            enabledPackages = VisionAssistConfig.getEnabledPackages(context)
+                        },
+                    )
+                }
+                HorizontalDivider()
+            }
+        }
+    }
+}
+
+private fun loadInstalledApps(packageManager: PackageManager): List<InstalledAppItem> {
+    @Suppress("DEPRECATION")
+    val apps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+    return apps.map { info ->
+        InstalledAppItem(
+            appName = packageManager.getApplicationLabel(info).toString(),
+            packageName = info.packageName,
+            icon = packageManager.getApplicationIcon(info),
+            isSystemApp = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
         )
     }
+}
+
+private fun sortComparator(sortMode: String, enabledPackages: Set<String>): Comparator<InstalledAppItem> {
+    val selectedFirst = compareByDescending<InstalledAppItem> { enabledPackages.contains(it.packageName) }
+    val orderedByMode = when (sortMode) {
+        VisionAssistConfig.SORT_APP_NAME_DESC -> {
+            compareByDescending<InstalledAppItem> { it.appName.lowercase() }
+                .thenBy { it.packageName.lowercase() }
+        }
+
+        VisionAssistConfig.SORT_PACKAGE_ASC -> {
+            compareBy<InstalledAppItem> { it.packageName.lowercase() }
+                .thenBy { it.appName.lowercase() }
+        }
+
+        else -> {
+            compareBy<InstalledAppItem> { it.appName.lowercase() }
+                .thenBy { it.packageName.lowercase() }
+        }
+    }
+
+    return selectedFirst.then(orderedByMode)
 }

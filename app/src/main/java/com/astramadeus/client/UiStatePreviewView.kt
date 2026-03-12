@@ -30,22 +30,23 @@ class UiStatePreviewView @JvmOverloads constructor(
 
     private val nodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = Color.parseColor("#1A4A6FA5")
+        color = Color.parseColor("#0B4A6FA5")
     }
 
     private val clickableNodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = Color.parseColor("#4D2E7D32")
+        color = Color.parseColor("#162E7D32")
+    }
+
+    private val visionSegmentBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        color = Color.parseColor("#FF8F5A2B")
     }
 
     private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#FF1A2A3A")
         textSize = 28f
-    }
-
-    private val metaPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FF3F4F5F")
-        textSize = 30f
     }
 
     fun submit(preview: UiStatePreview?) {
@@ -68,11 +69,10 @@ class UiStatePreviewView @JvmOverloads constructor(
         }
 
         val horizontalPadding = 24f
-        val topInfoHeight = 120f
-        val bottomPadding = 24f
+        val verticalPadding = 24f
 
         val usableWidth = width - horizontalPadding * 2f
-        val usableHeight = height - topInfoHeight - bottomPadding
+        val usableHeight = height - verticalPadding * 2f
         val scale = minOf(
             usableWidth / data.screenBounds.width().toFloat(),
             usableHeight / data.screenBounds.height().toFloat(),
@@ -81,7 +81,7 @@ class UiStatePreviewView @JvmOverloads constructor(
         val previewWidth = data.screenBounds.width() * scale
         val previewHeight = data.screenBounds.height() * scale
         val previewLeft = (width - previewWidth) / 2f
-        val previewTop = topInfoHeight + max(0f, (usableHeight - previewHeight) / 2f)
+        val previewTop = verticalPadding + max(0f, (usableHeight - previewHeight) / 2f)
         val previewRect = RectF(
             previewLeft,
             previewTop,
@@ -92,7 +92,22 @@ class UiStatePreviewView @JvmOverloads constructor(
         canvas.drawRoundRect(previewRect, 20f, 20f, framePaint)
         canvas.drawRoundRect(previewRect, 20f, 20f, borderPaint)
 
-        drawMeta(canvas, data)
+        if (data.visionSegments.isNotEmpty()) {
+            data.visionSegments.forEach { segment ->
+                val left = previewRect.left + (segment.bounds.left - data.screenBounds.left) * scale
+                val top = previewRect.top + (segment.bounds.top - data.screenBounds.top) * scale
+                val right = previewRect.left + (segment.bounds.right - data.screenBounds.left) * scale
+                val bottom = previewRect.top + (segment.bounds.bottom - data.screenBounds.top) * scale
+
+                if (right <= left || bottom <= top) {
+                    return@forEach
+                }
+
+                val rect = RectF(left, top, right, bottom)
+                canvas.drawBitmap(segment.bitmap, null, rect, null)
+                canvas.drawRoundRect(rect, 8f, 8f, visionSegmentBorderPaint)
+            }
+        }
 
         data.nodes.forEach { node ->
             val left = previewRect.left + (node.bounds.left - data.screenBounds.left) * scale
@@ -128,14 +143,6 @@ class UiStatePreviewView @JvmOverloads constructor(
             node.desc.isNotBlank() -> node.desc
             node.className.isNotBlank() -> node.className.substringAfterLast('.')
             else -> node.id
-        }
-    }
-
-    private fun drawMeta(canvas: Canvas, preview: UiStatePreview) {
-        val meta = "${preview.packageName} | ${preview.eventType}"
-        canvas.drawText(meta, 20f, 40f, metaPaint)
-        if (preview.activityName.isNotBlank()) {
-            canvas.drawText(preview.activityName, 20f, 80f, metaPaint)
         }
     }
 

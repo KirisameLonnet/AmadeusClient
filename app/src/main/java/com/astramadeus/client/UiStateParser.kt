@@ -1,6 +1,8 @@
 package com.astramadeus.client
 
 import android.graphics.Rect
+import android.graphics.BitmapFactory
+import android.util.Base64
 import org.json.JSONObject
 
 object UiStateParser {
@@ -44,12 +46,35 @@ object UiStateParser {
             }
 
             val screenBounds = Rect(minLeft, minTop, maxRight, maxBottom)
+            val visionSegments = mutableListOf<PreviewVisionSegment>()
+            val rawSegments = data.optJSONArray("vision_segments")
+
+            if (rawSegments != null) {
+                for (index in 0 until rawSegments.length()) {
+                    val item = rawSegments.optJSONObject(index) ?: continue
+                    val bounds = parseBounds(item.optString("bounds")) ?: continue
+                    val encoded = item.optString("image_base64")
+                    if (encoded.isBlank()) {
+                        continue
+                    }
+
+                    val decoded = runCatching { Base64.decode(encoded, Base64.DEFAULT) }.getOrNull() ?: continue
+                    val bitmap = BitmapFactory.decodeByteArray(decoded, 0, decoded.size) ?: continue
+                    visionSegments += PreviewVisionSegment(
+                        id = item.optString("id"),
+                        bounds = bounds,
+                        bitmap = bitmap,
+                    )
+                }
+            }
+
             UiStatePreview(
                 packageName = data.optString("package_name"),
                 activityName = data.optString("activity_name"),
                 eventType = data.optString("event_type"),
                 screenBounds = screenBounds,
                 nodes = nodes,
+                visionSegments = visionSegments,
             )
         }.getOrNull()
     }

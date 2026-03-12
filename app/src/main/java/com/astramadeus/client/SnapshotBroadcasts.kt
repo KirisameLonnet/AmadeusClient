@@ -6,6 +6,7 @@ import android.content.Intent
 object SnapshotBroadcasts {
     const val ACTION_SNAPSHOT_UPDATED = "com.astramadeus.client.ACTION_SNAPSHOT_UPDATED"
     const val ACTION_SERVICE_STATUS_CHANGED = "com.astramadeus.client.ACTION_SERVICE_STATUS_CHANGED"
+    const val ACTION_REQUEST_SNAPSHOT = "com.astramadeus.client.ACTION_REQUEST_SNAPSHOT"
     const val EXTRA_ENABLED = "extra_enabled"
 
     @Volatile
@@ -34,6 +35,13 @@ object SnapshotBroadcasts {
             Intent(ACTION_SERVICE_STATUS_CHANGED)
                 .setPackage(context.packageName)
                 .putExtra(EXTRA_ENABLED, enabled),
+        )
+    }
+
+    fun requestSnapshot(context: Context) {
+        context.sendBroadcast(
+            Intent(ACTION_REQUEST_SNAPSHOT)
+                .setPackage(context.packageName),
         )
     }
 

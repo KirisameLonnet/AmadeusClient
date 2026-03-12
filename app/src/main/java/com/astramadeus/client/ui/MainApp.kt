@@ -4,10 +4,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LargeTopAppBar
@@ -36,19 +34,22 @@ sealed class Screen(
     val unselectedIcon: ImageVector
 ) {
     object Home : Screen("home", "Home", Icons.Filled.Home, Icons.Outlined.Home)
-    object Favorites : Screen("favorites", "Favorites", Icons.Filled.Star, Icons.Outlined.Star)
     object Settings : Screen("settings", "Settings", Icons.Filled.Settings, Icons.Outlined.Settings)
 }
 
 val items = listOf(
     Screen.Home,
-    Screen.Favorites,
     Screen.Settings
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainApp() {
+fun MainApp(
+    serviceEnabled: Boolean,
+    latestSnapshot: String?,
+    onOpenAccessibilitySettings: () -> Unit,
+    onRefreshStatus: () -> Unit,
+) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
@@ -99,13 +100,16 @@ fun MainApp() {
             modifier = Modifier.padding(innerPadding)
         ) {
             composable(Screen.Home.route) {
-                // Placeholder
-            }
-            composable(Screen.Favorites.route) {
-                // Placeholder
+                HomeScreen(
+                    latestSnapshot = latestSnapshot,
+                )
             }
             composable(Screen.Settings.route) {
-                SettingsScreen()
+                SettingsScreen(
+                    serviceEnabled = serviceEnabled,
+                    onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                    onRefresh = onRefreshStatus,
+                )
             }
         }
     }

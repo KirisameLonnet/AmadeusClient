@@ -1,10 +1,21 @@
 package com.astramadeus.client
 
 import android.accessibilityservice.AccessibilityService
+import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.Rect
+import android.hardware.HardwareBuffer
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import androidx.core.content.ContextCompat
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
@@ -13,10 +24,27 @@ class AmadeusAccessibilityService : AccessibilityService() {
 
     private var lastSnapshotAt: Long = 0L
     private var lastSnapshotSignature: String? = null
+    private var visionCaptureInFlight: Boolean = false
+
+    private val boundsRegex = Regex("\\[(-?\\d+),(-?\\d+)]\\[(-?\\d+),(-?\\d+)]")
+
+    private val snapshotRequestReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == SnapshotBroadcasts.ACTION_REQUEST_SNAPSHOT) {
+                captureAndPublishSnapshot(event = null, force = true)
+            }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         Log.i(TAG, "Accessibility service connected")
+        ContextCompat.registerReceiver(
+            this,
+            snapshotRequestReceiver,
+            IntentFilter(SnapshotBroadcasts.ACTION_REQUEST_SNAPSHOT),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         SnapshotBroadcasts.publishStatus(this, true)
     }
 
@@ -29,35 +57,7 @@ class AmadeusAccessibilityService : AccessibilityService() {
             return
         }
 
-        val now = System.currentTimeMillis()
-        if (now - lastSnapshotAt < SNAPSHOT_DEBOUNCE_MS) {
-            return
-        }
-
-        val root = rootInActiveWindow ?: return
-        val rootPackageName = root.packageName?.toString().orEmpty()
-        val eventPackageName = event.packageName?.toString().orEmpty()
-
-        if (rootPackageName.isEmpty() || rootPackageName == packageName) {
-            return
-        }
-
-        if (eventPackageName.isNotEmpty() && eventPackageName != rootPackageName && eventPackageName == SYSTEM_UI_PACKAGE) {
-            return
-        }
-
-        val snapshot = buildSnapshot(root, event, now)
-        val snapshotSignature = buildSnapshotSignature(snapshot)
-
-        if (snapshotSignature == lastSnapshotSignature) {
-            return
-        }
-
-        lastSnapshotAt = now
-        lastSnapshotSignature = snapshotSignature
-
-        Log.i(TAG, snapshot.toString())
-        SnapshotBroadcasts.publishSnapshot(this, snapshot.toString())
+        captureAndPublishSnapshot(event = event, force = false)
     }
 
     override fun onInterrupt() {
@@ -65,15 +65,348 @@ class AmadeusAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(snapshotRequestReceiver)
         SnapshotBroadcasts.publishStatus(this, false)
         super.onDestroy()
     }
 
+    private fun captureAndPublishSnapshot(event: AccessibilityEvent?, force: Boolean) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastSnapshotAt < SNAPSHOT_DEBOUNCE_MS) {
+            return
+        }
+
+        val root = rootInActiveWindow ?: return
+        val rootPackageName = root.packageName?.toString().orEmpty()
+        if (rootPackageName.isEmpty() || rootPackageName == packageName) {
+            return
+        }
+
+        val eventPackageName = event?.packageName?.toString().orEmpty()
+        if (eventPackageName.isNotEmpty() && eventPackageName != rootPackageName && eventPackageName == SYSTEM_UI_PACKAGE) {
+            return
+        }
+
+        val snapshot = buildSnapshot(root, event, now)
+        val snapshotSignature = buildSnapshotSignature(snapshot)
+        val isSameSnapshot = snapshotSignature == lastSnapshotSignature
+
+        if (isSameSnapshot) {
+            val withinRepeatWindow = now - lastSnapshotAt < FORCED_REPEAT_MIN_INTERVAL_MS
+            if (!force || withinRepeatWindow) {
+                return
+            }
+        }
+
+        if (!VisionAssistConfig.isVisionAssistEnabled(this, rootPackageName)) {
+            publishSnapshot(snapshot, snapshotSignature, now)
+            return
+        }
+
+        val visionTargets = extractVisionTargets(snapshot)
+        val captureWindow = resolveCaptureWindow(rootPackageName)
+        val shouldCaptureVision =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+                visionTargets.isNotEmpty() &&
+                !visionCaptureInFlight
+
+        if (shouldCaptureVision) {
+            captureVisionSnapshot(
+                baseSnapshot = snapshot,
+                snapshotSignature = snapshotSignature,
+                timestamp = now,
+                targets = visionTargets,
+                captureWindow = captureWindow,
+            )
+            return
+        }
+
+        publishSnapshot(snapshot, snapshotSignature, now)
+    }
+
+    @SuppressLint("NewApi")
+    private fun captureVisionSnapshot(
+        baseSnapshot: JSONObject,
+        snapshotSignature: String,
+        timestamp: Long,
+        targets: List<VisionTarget>,
+        captureWindow: CaptureWindow?,
+    ) {
+        visionCaptureInFlight = true
+
+        val callback = object : TakeScreenshotCallback {
+            override fun onSuccess(screenshot: ScreenshotResult) {
+                val enrichedSnapshot = runCatching {
+                    buildSnapshotWithVisionSegments(
+                        baseSnapshot = baseSnapshot,
+                        screenshot = screenshot,
+                        targets = targets,
+                        captureWindowBounds = captureWindow?.boundsInScreen,
+                    )
+                }.getOrElse { error ->
+                    Log.w(TAG, "Failed to build vision segments: ${error.message}")
+                    baseSnapshot
+                }
+
+                visionCaptureInFlight = false
+                publishSnapshot(enrichedSnapshot, snapshotSignature, timestamp)
+            }
+
+            override fun onFailure(errorCode: Int) {
+                visionCaptureInFlight = false
+                Log.w(TAG, "takeScreenshot failed with code=$errorCode")
+                publishSnapshot(baseSnapshot, snapshotSignature, timestamp)
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && captureWindow != null) {
+            takeScreenshotOfWindow(captureWindow.windowId, mainExecutor, callback)
+            return
+        }
+
+        visionCaptureInFlight = false
+        Log.w(TAG, "Skip vision capture: app-window screenshot unavailable")
+        publishSnapshot(baseSnapshot, snapshotSignature, timestamp)
+    }
+
+    private fun publishSnapshot(snapshot: JSONObject, signature: String, timestamp: Long) {
+        lastSnapshotAt = timestamp
+        lastSnapshotSignature = signature
+        Log.i(TAG, snapshot.toString())
+        SnapshotBroadcasts.publishSnapshot(this, snapshot.toString())
+    }
+
+    @SuppressLint("NewApi")
+    private fun buildSnapshotWithVisionSegments(
+        baseSnapshot: JSONObject,
+        screenshot: ScreenshotResult,
+        targets: List<VisionTarget>,
+        captureWindowBounds: Rect?,
+    ): JSONObject {
+        val data = baseSnapshot.getJSONObject("data")
+        val hardwareBuffer: HardwareBuffer = screenshot.hardwareBuffer
+        val hardwareBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
+        val bitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+
+        hardwareBitmap?.recycle()
+        hardwareBuffer.close()
+
+        if (bitmap == null) {
+            return baseSnapshot
+        }
+
+        val segments = runCatching {
+            buildVisionSegments(bitmap, targets, captureWindowBounds)
+        }.getOrDefault(JSONArray())
+
+        bitmap.recycle()
+        data.put("vision_segments", segments)
+        return baseSnapshot
+    }
+
+    private fun buildVisionSegments(
+        bitmap: Bitmap,
+        targets: List<VisionTarget>,
+        captureWindowBounds: Rect?,
+    ): JSONArray {
+        val segments = JSONArray()
+
+        targets.take(MAX_VISION_SEGMENTS).forEach { target ->
+            val captureSpaceBounds = toCaptureSpace(target.bounds, captureWindowBounds)
+            val clampedCaptureBounds = Rect(
+                captureSpaceBounds.left.coerceIn(0, bitmap.width),
+                captureSpaceBounds.top.coerceIn(0, bitmap.height),
+                captureSpaceBounds.right.coerceIn(0, bitmap.width),
+                captureSpaceBounds.bottom.coerceIn(0, bitmap.height),
+            )
+
+            if (clampedCaptureBounds.width() < MIN_VISION_BOUNDS_SIZE_PX || clampedCaptureBounds.height() < MIN_VISION_BOUNDS_SIZE_PX) {
+                return@forEach
+            }
+
+            val crop = Bitmap.createBitmap(
+                bitmap,
+                clampedCaptureBounds.left,
+                clampedCaptureBounds.top,
+                clampedCaptureBounds.width(),
+                clampedCaptureBounds.height(),
+            )
+
+            val normalizedCrop = scaleDown(crop, VISION_CROP_MAX_EDGE_PX)
+            if (normalizedCrop !== crop) {
+                crop.recycle()
+            }
+
+            val output = ByteArrayOutputStream()
+            normalizedCrop.compress(Bitmap.CompressFormat.JPEG, VISION_CROP_JPEG_QUALITY, output)
+            normalizedCrop.recycle()
+
+            val encoded = android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP)
+            output.close()
+
+            segments.put(
+                JSONObject()
+                    .put("id", target.id)
+                    .put("bounds", "[${target.bounds.left},${target.bounds.top}][${target.bounds.right},${target.bounds.bottom}]")
+                    .put("image_base64", encoded)
+                    .put("image_format", "jpeg"),
+            )
+        }
+
+        return segments
+    }
+
+    private fun scaleDown(bitmap: Bitmap, maxEdge: Int): Bitmap {
+        val maxCurrentEdge = maxOf(bitmap.width, bitmap.height)
+        if (maxCurrentEdge <= maxEdge) {
+            return bitmap
+        }
+
+        val scale = maxEdge.toFloat() / maxCurrentEdge.toFloat()
+        val width = (bitmap.width * scale).toInt().coerceAtLeast(1)
+        val height = (bitmap.height * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, width, height, true)
+    }
+
+    private fun extractVisionTargets(snapshot: JSONObject): List<VisionTarget> {
+        val data = snapshot.optJSONObject("data") ?: return emptyList()
+        val elements = data.optJSONArray("elements") ?: return emptyList()
+        val screenBounds = parseBoundsFromSnapshot(elements) ?: return emptyList()
+        val screenArea = screenBounds.width().toLong() * screenBounds.height().toLong()
+        val targets = mutableListOf<VisionTarget>()
+
+        for (index in 0 until elements.length()) {
+            val node = elements.optJSONObject(index) ?: continue
+            if (!shouldCaptureVisionForNode(node)) {
+                continue
+            }
+
+            val bounds = parseBounds(node.optString("bounds")) ?: continue
+            if (bounds.width() < MIN_VISION_BOUNDS_SIZE_PX || bounds.height() < MIN_VISION_BOUNDS_SIZE_PX) {
+                continue
+            }
+
+            val area = bounds.width().toLong() * bounds.height().toLong()
+            if (screenArea > 0L && area > (screenArea * MAX_VISION_AREA_RATIO).toLong()) {
+                continue
+            }
+
+            targets += VisionTarget(
+                id = node.optString("id"),
+                bounds = bounds,
+            )
+        }
+
+        if (targets.size > MAX_VISION_SEGMENTS) {
+            return targets
+                .sortedBy { it.bounds.width().toLong() * it.bounds.height().toLong() }
+                .take(MAX_VISION_SEGMENTS)
+        }
+
+        return targets
+    }
+
+    private fun parseBoundsFromSnapshot(elements: JSONArray): Rect? {
+        var minLeft = Int.MAX_VALUE
+        var minTop = Int.MAX_VALUE
+        var maxRight = Int.MIN_VALUE
+        var maxBottom = Int.MIN_VALUE
+
+        for (index in 0 until elements.length()) {
+            val node = elements.optJSONObject(index) ?: continue
+            val bounds = parseBounds(node.optString("bounds")) ?: continue
+            minLeft = minOf(minLeft, bounds.left)
+            minTop = minOf(minTop, bounds.top)
+            maxRight = maxOf(maxRight, bounds.right)
+            maxBottom = maxOf(maxBottom, bounds.bottom)
+        }
+
+        if (minLeft == Int.MAX_VALUE || minTop == Int.MAX_VALUE || maxRight <= minLeft || maxBottom <= minTop) {
+            return null
+        }
+
+        return Rect(minLeft, minTop, maxRight, maxBottom)
+    }
+
+    private fun shouldCaptureVisionForNode(node: JSONObject): Boolean {
+        if (!node.optBoolean("is_visible_to_user", true)) {
+            return false
+        }
+
+        val text = node.optString("text")
+        val desc = node.optString("desc")
+        if (hasMeaningfulLabel(text) || hasMeaningfulLabel(desc)) {
+            return false
+        }
+
+        val className = node.optString("class_name")
+        val isViewLikeClass = className.contains("View", ignoreCase = true) ||
+            className.contains("Layout", ignoreCase = true)
+        val isVisualClass = className.contains("Image", ignoreCase = true) ||
+            className.contains("Icon", ignoreCase = true) ||
+            className.contains("WebView", ignoreCase = true)
+        val isActionableWithoutLabel = node.optBoolean("is_clickable") ||
+            node.optBoolean("is_scrollable") ||
+            node.optBoolean("is_editable") ||
+            node.optBoolean("is_focusable")
+
+        return isVisualClass || (isViewLikeClass && isActionableWithoutLabel)
+    }
+
+    private fun hasMeaningfulLabel(value: String): Boolean {
+        val normalized = value.trim()
+        if (normalized.isBlank()) {
+            return false
+        }
+
+        return normalized.any { it.isLetterOrDigit() }
+    }
+
+    private fun parseBounds(value: String): Rect? {
+        val match = boundsRegex.matchEntire(value) ?: return null
+        val left = match.groupValues[1].toInt()
+        val top = match.groupValues[2].toInt()
+        val right = match.groupValues[3].toInt()
+        val bottom = match.groupValues[4].toInt()
+        return Rect(left, top, right, bottom)
+    }
+
+    private fun toCaptureSpace(bounds: Rect, captureWindowBounds: Rect?): Rect {
+        if (captureWindowBounds == null) {
+            return Rect(bounds)
+        }
+
+        return Rect(
+            bounds.left - captureWindowBounds.left,
+            bounds.top - captureWindowBounds.top,
+            bounds.right - captureWindowBounds.left,
+            bounds.bottom - captureWindowBounds.top,
+        )
+    }
+
+    private fun resolveCaptureWindow(rootPackageName: String): CaptureWindow? {
+        val window = windows
+            .asSequence()
+            .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            .firstOrNull { info ->
+                val pkg = info.root?.packageName?.toString().orEmpty()
+                pkg == rootPackageName
+            }
+            ?: return null
+
+        val bounds = Rect()
+        window.getBoundsInScreen(bounds)
+        return CaptureWindow(window.id, bounds)
+    }
+
     private fun buildSnapshot(
         root: AccessibilityNodeInfo,
-        event: AccessibilityEvent,
+        event: AccessibilityEvent?,
         timestamp: Long,
     ): JSONObject {
+        val eventType = event?.eventType?.let(AccessibilityEvent::eventTypeToString) ?: REQUEST_EVENT_TYPE
+        val activityName = event?.className?.toString().orEmpty()
+
         val elements = JSONArray()
         traverseNode(
             node = root,
@@ -91,8 +424,8 @@ class AmadeusAccessibilityService : AccessibilityService() {
                 "data",
                 JSONObject()
                     .put("package_name", root.packageName?.toString().orEmpty())
-                    .put("activity_name", event.className?.toString().orEmpty())
-                    .put("event_type", AccessibilityEvent.eventTypeToString(event.eventType))
+                    .put("activity_name", activityName)
+                    .put("event_type", eventType)
                     .put("elements", elements),
             )
     }
@@ -217,9 +550,27 @@ class AmadeusAccessibilityService : AccessibilityService() {
             return current
         }
     }
+
+    private data class VisionTarget(
+        val id: String,
+        val bounds: Rect,
+    )
+
+    private data class CaptureWindow(
+        val windowId: Int,
+        val boundsInScreen: Rect,
+    )
+
     companion object {
         private const val TAG = "AmadeusAccessibility"
         private const val SNAPSHOT_DEBOUNCE_MS = 350L
+        private const val FORCED_REPEAT_MIN_INTERVAL_MS = 2_500L
+        private const val VISION_CROP_MAX_EDGE_PX = 1080
+        private const val VISION_CROP_JPEG_QUALITY = 88
+        private const val MIN_VISION_BOUNDS_SIZE_PX = 24
+        private const val MAX_VISION_SEGMENTS = 64
+        private const val MAX_VISION_AREA_RATIO = 0.35
+        private const val REQUEST_EVENT_TYPE = "TYPE_SNAPSHOT_REQUESTED"
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
     }
 }
