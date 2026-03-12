@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         syncRateSettingsFromConfig()
+        UiFrameWebSocketClient.syncConfig(this)
         enableEdgeToEdge()
         setContent {
             val serviceEnabledState by serviceEnabled.collectAsState()
@@ -75,6 +76,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        UiFrameWebSocketClient.syncConfig(this)
         val filter = IntentFilter().apply {
             addAction(SnapshotBroadcasts.ACTION_SNAPSHOT_UPDATED)
             addAction(SnapshotBroadcasts.ACTION_SERVICE_STATUS_CHANGED)

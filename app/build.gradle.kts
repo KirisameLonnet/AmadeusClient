@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.okhttp)
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)

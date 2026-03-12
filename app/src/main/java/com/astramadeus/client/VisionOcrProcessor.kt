@@ -1,5 +1,6 @@
 package com.astramadeus.client
 
+import android.graphics.Bitmap
 import android.util.Log
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
@@ -10,8 +11,29 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 object VisionOcrProcessor {
-    private val recognizer: TextRecognizer =
-        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    private val recognizerLocal = ThreadLocal<TextRecognizer>()
+
+    private fun recognizer(): TextRecognizer {
+        val existing = recognizerLocal.get()
+        if (existing != null) {
+            return existing
+        }
+
+        val created = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+        recognizerLocal.set(created)
+        return created
+    }
+
+    fun recognizeBitmapBlocking(bitmap: Bitmap): String {
+        return runCatching {
+            val image = InputImage.fromBitmap(bitmap, 0)
+            val output = Tasks.await(recognizer().process(image))
+            output.text.trim()
+        }.getOrElse { error ->
+            Log.w(TAG, "OCR bitmap failed: ${error.message}")
+            ""
+        }
+    }
 
     suspend fun recognizeSegments(
         packageName: String,
@@ -25,13 +47,7 @@ object VisionOcrProcessor {
             val results = mutableMapOf<String, String>()
 
             segments.forEach { segment ->
-                val text = runCatching {
-                    val image = InputImage.fromBitmap(segment.bitmap, 0)
-                    val output = Tasks.await(recognizer.process(image))
-                    output.text.trim()
-                }.onFailure { error ->
-                    Log.w(TAG, "OCR failed id=${segment.id}: ${error.message}")
-                }.getOrDefault("")
+                val text = recognizeBitmapBlocking(segment.bitmap)
 
                 if (text.isNotBlank()) {
                     results[segment.id] = text

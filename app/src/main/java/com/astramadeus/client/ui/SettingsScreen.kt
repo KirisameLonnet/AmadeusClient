@@ -4,6 +4,12 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.widget.ImageView
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.NetworkInterface
+import kotlin.math.roundToInt
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -35,6 +41,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,11 +59,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.astramadeus.client.R
+import com.astramadeus.client.OcrPipelineConfig
+import com.astramadeus.client.UiFrameWebSocketClient
 import com.astramadeus.client.VisionAssistConfig
+import com.astramadeus.client.WebSocketPushConfig
+import kotlinx.coroutines.delay
 
 private enum class SettingsPage {
     Main,
     VisionApps,
+    WebSocket,
 }
 
 private data class InstalledAppItem(
@@ -63,6 +76,12 @@ private data class InstalledAppItem(
     val packageName: String,
     val icon: Drawable,
     val isSystemApp: Boolean,
+)
+
+private data class LocalAddressItem(
+    val interfaceName: String,
+    val hostAddress: String,
+    val ipVersion: String,
 )
 
 @Composable
@@ -79,9 +98,11 @@ fun SettingsScreen(
             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
             onRefresh = onRefresh,
             onOpenVisionApps = { page = SettingsPage.VisionApps },
+            onOpenWebSocket = { page = SettingsPage.WebSocket },
         )
 
         SettingsPage.VisionApps -> VisionAssistAppsPage(onBack = { page = SettingsPage.Main })
+        SettingsPage.WebSocket -> WebSocketSettingsPage(onBack = { page = SettingsPage.Main })
     }
 }
 
@@ -91,7 +112,13 @@ private fun SettingsMainPage(
     onOpenAccessibilitySettings: () -> Unit,
     onRefresh: () -> Unit,
     onOpenVisionApps: () -> Unit,
+    onOpenWebSocket: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var ocrParallelism by remember {
+        mutableStateOf(OcrPipelineConfig.getMaxParallelism(context).toFloat())
+    }
+
     val serviceStatus = if (serviceEnabled) {
         stringResource(R.string.service_status_enabled)
     } else {
@@ -162,6 +189,224 @@ private fun SettingsMainPage(
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                     contentDescription = stringResource(R.string.vision_assist_entry_title),
+                )
+            }
+        }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenWebSocket)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.websocket_settings_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = stringResource(R.string.websocket_settings_subtitle),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = stringResource(R.string.websocket_settings_title),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WebSocketSettingsPage(onBack: () -> Unit) {
+    val context = LocalContext.current
+
+    var enabled by remember { mutableStateOf(WebSocketPushConfig.isEnabled(context)) }
+    var wsUrl by remember { mutableStateOf(WebSocketPushConfig.getUrl(context)) }
+    val localAddresses by produceState(initialValue = emptyList<LocalAddressItem>(), context) {
+        value = loadLocalAddresses()
+    }
+
+    val connectionState by produceState(initialValue = UiFrameWebSocketClient.connectionState) {
+        while (true) {
+            value = UiFrameWebSocketClient.connectionState
+            delay(500)
+        }
+    }
+
+    val lastError by produceState(initialValue = UiFrameWebSocketClient.lastError) {
+        while (true) {
+            value = UiFrameWebSocketClient.lastError
+            delay(500)
+        }
+    }
+
+    val stateLabel = when (connectionState) {
+        UiFrameWebSocketClient.ConnectionState.DISCONNECTED -> stringResource(R.string.websocket_status_disconnected)
+        UiFrameWebSocketClient.ConnectionState.CONNECTING -> stringResource(R.string.websocket_status_connecting)
+        UiFrameWebSocketClient.ConnectionState.CONNECTED -> stringResource(R.string.websocket_status_connected)
+        UiFrameWebSocketClient.ConnectionState.ERROR -> stringResource(R.string.websocket_status_error)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.back),
+                )
+            }
+            Text(
+                text = stringResource(R.string.websocket_settings_title),
+                style = MaterialTheme.typography.titleLarge,
+            )
+        }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = stringResource(R.string.websocket_enable_push),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = { checked ->
+                            enabled = checked
+                            WebSocketPushConfig.setEnabled(context, checked)
+                            UiFrameWebSocketClient.syncConfig(context)
+                        },
+                    )
+                }
+
+                OutlinedTextField(
+                    value = wsUrl,
+                    onValueChange = { wsUrl = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.websocket_server_url)) },
+                )
+
+                Button(
+                    onClick = {
+                        WebSocketPushConfig.setUrl(context, wsUrl)
+                        wsUrl = WebSocketPushConfig.getUrl(context)
+                        UiFrameWebSocketClient.syncConfig(context)
+                    },
+                ) {
+                    Text(text = stringResource(R.string.websocket_save))
+                }
+
+                Text(
+                    text = stringResource(R.string.websocket_current_status, stateLabel),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                lastError?.takeIf { it.isNotBlank() }?.let { error ->
+                    Text(
+                        text = stringResource(R.string.websocket_last_error, error),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.websocket_local_ips_title),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+
+                if (localAddresses.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.websocket_local_ips_empty),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    localAddresses.forEach { item ->
+                        Text(
+                            text = "${item.interfaceName} [${item.ipVersion}]: ${item.hostAddress}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.ocr_settings_title),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = stringResource(R.string.ocr_parallelism_label, ocrParallelism.toInt()),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Slider(
+                    value = ocrParallelism,
+                    onValueChange = { value ->
+                        ocrParallelism = value.roundToInt().toFloat()
+                    },
+                    valueRange = OcrPipelineConfig.MIN_PARALLELISM.toFloat()..OcrPipelineConfig.MAX_PARALLELISM.toFloat(),
+                    steps = OcrPipelineConfig.MAX_PARALLELISM - OcrPipelineConfig.MIN_PARALLELISM - 1,
+                    onValueChangeFinished = {
+                        val normalized = OcrPipelineConfig.normalizeParallelism(ocrParallelism.roundToInt())
+                        ocrParallelism = normalized.toFloat()
+                        OcrPipelineConfig.setMaxParallelism(context, normalized)
+                    },
+                )
+                Text(
+                    text = stringResource(R.string.ocr_parallelism_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -393,4 +638,41 @@ private fun sortComparator(sortMode: String, enabledPackages: Set<String>): Comp
     }
 
     return selectedFirst.then(orderedByMode)
+}
+
+private fun loadLocalAddresses(): List<LocalAddressItem> {
+    return runCatching {
+        val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        val addresses = interfaces
+            .asSequence()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { networkInterface ->
+                networkInterface.inetAddresses
+                    .toList()
+                    .asSequence()
+                    .filter { !it.isLoopbackAddress }
+                    .map { address ->
+                        val host = address.hostAddress?.substringBefore('%').orEmpty()
+                        val ipVersion = when (address) {
+                            is Inet4Address -> "IPv4"
+                            is Inet6Address -> "IPv6"
+                            else -> "IP"
+                        }
+                        LocalAddressItem(
+                            interfaceName = networkInterface.name,
+                            hostAddress = host,
+                            ipVersion = ipVersion,
+                        )
+                    }
+                    .filter { it.hostAddress.isNotBlank() }
+            }
+
+        val ipv4 = addresses.filter { it.ipVersion == "IPv4" }
+        val ipv6 = addresses.filter { it.ipVersion == "IPv6" }
+
+        (ipv4 + ipv6)
+            .distinctBy { "${it.interfaceName}|${it.hostAddress}" }
+            .sortedWith(compareBy({ if (it.ipVersion == "IPv4") 0 else 1 }, { it.interfaceName }, { it.hostAddress }))
+            .toList()
+    }.getOrDefault(emptyList())
 }

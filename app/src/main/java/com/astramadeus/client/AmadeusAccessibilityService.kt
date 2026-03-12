@@ -17,6 +17,10 @@ import android.view.accessibility.AccessibilityWindowInfo
 import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -45,6 +49,7 @@ class AmadeusAccessibilityService : AccessibilityService() {
             IntentFilter(SnapshotBroadcasts.ACTION_REQUEST_SNAPSHOT),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        UiFrameWebSocketClient.syncConfig(this)
         SnapshotBroadcasts.publishStatus(this, true)
     }
 
@@ -106,12 +111,16 @@ class AmadeusAccessibilityService : AccessibilityService() {
 
         val visionTargets = extractVisionTargets(snapshot, rootPackageName)
         val captureWindow = resolveCaptureWindow(rootPackageName)
-        val shouldCaptureVision =
+        val shouldUseVisionPipeline =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                visionTargets.isNotEmpty() &&
-                !visionCaptureInFlight
+                visionTargets.isNotEmpty()
 
-        if (shouldCaptureVision) {
+        if (shouldUseVisionPipeline && visionCaptureInFlight) {
+            Log.d(TAG, "Skip frame: vision pipeline busy")
+            return
+        }
+
+        if (shouldUseVisionPipeline) {
             captureVisionSnapshot(
                 baseSnapshot = snapshot,
                 snapshotSignature = snapshotSignature,
@@ -137,20 +146,24 @@ class AmadeusAccessibilityService : AccessibilityService() {
 
         val callback = object : TakeScreenshotCallback {
             override fun onSuccess(screenshot: ScreenshotResult) {
-                val enrichedSnapshot = runCatching {
-                    buildSnapshotWithVisionSegments(
-                        baseSnapshot = baseSnapshot,
-                        screenshot = screenshot,
-                        targets = targets,
-                        captureWindowBounds = captureWindow?.boundsInScreen,
-                    )
-                }.getOrElse { error ->
-                    Log.w(TAG, "Failed to build vision segments: ${error.message}")
-                    baseSnapshot
-                }
+                thread(name = "vision-segments-builder") {
+                    val enrichedSnapshot = runCatching {
+                        buildSnapshotWithVisionSegments(
+                            baseSnapshot = baseSnapshot,
+                            screenshot = screenshot,
+                            targets = targets,
+                            captureWindowBounds = captureWindow?.boundsInScreen,
+                        )
+                    }.getOrElse { error ->
+                        Log.w(TAG, "Failed to build vision segments: ${error.message}")
+                        baseSnapshot
+                    }
 
-                visionCaptureInFlight = false
-                publishSnapshot(enrichedSnapshot, snapshotSignature, timestamp)
+                    mainExecutor.execute {
+                        visionCaptureInFlight = false
+                        publishSnapshot(enrichedSnapshot, snapshotSignature, timestamp)
+                    }
+                }
             }
 
             override fun onFailure(errorCode: Int) {
@@ -174,7 +187,9 @@ class AmadeusAccessibilityService : AccessibilityService() {
         lastSnapshotAt = timestamp
         lastSnapshotSignature = signature
         Log.i(TAG, snapshot.toString())
-        SnapshotBroadcasts.publishSnapshot(this, snapshot.toString())
+        val snapshotText = snapshot.toString()
+        SnapshotBroadcasts.publishSnapshot(this, snapshotText)
+        UiFrameWebSocketClient.sendUiFrame(this, snapshotText)
     }
 
     @SuppressLint("NewApi")
@@ -210,7 +225,9 @@ class AmadeusAccessibilityService : AccessibilityService() {
         targets: List<VisionTarget>,
         captureWindowBounds: Rect?,
     ): JSONArray {
+        val pipelineStartAt = System.currentTimeMillis()
         val segments = JSONArray()
+        val preparedSegments = mutableListOf<PreparedVisionSegment>()
 
         targets.take(MAX_VISION_SEGMENTS).forEach { target ->
             val captureSpaceBounds = toCaptureSpace(target.bounds, captureWindowBounds)
@@ -238,23 +255,79 @@ class AmadeusAccessibilityService : AccessibilityService() {
                 crop.recycle()
             }
 
+            preparedSegments += PreparedVisionSegment(
+                id = target.id,
+                bounds = target.bounds,
+                bitmap = normalizedCrop,
+            )
+        }
+
+        val configuredParallelism = OcrPipelineConfig.getMaxParallelism(this)
+        val ocrResultByNodeId = runParallelOcr(preparedSegments, configuredParallelism)
+        var ocrHitCount = 0
+
+        preparedSegments.forEach { segment ->
+            val ocrText = ocrResultByNodeId[segment.id].orEmpty()
+            if (ocrText.isNotBlank()) {
+                ocrHitCount += 1
+            }
+
             val output = ByteArrayOutputStream()
-            normalizedCrop.compress(Bitmap.CompressFormat.JPEG, VISION_CROP_JPEG_QUALITY, output)
-            normalizedCrop.recycle()
+            segment.bitmap.compress(Bitmap.CompressFormat.JPEG, VISION_CROP_JPEG_QUALITY, output)
+            segment.bitmap.recycle()
 
             val encoded = android.util.Base64.encodeToString(output.toByteArray(), android.util.Base64.NO_WRAP)
             output.close()
 
             segments.put(
                 JSONObject()
-                    .put("id", target.id)
-                    .put("bounds", "[${target.bounds.left},${target.bounds.top}][${target.bounds.right},${target.bounds.bottom}]")
+                    .put("id", segment.id)
+                    .put("bounds", "[${segment.bounds.left},${segment.bounds.top}][${segment.bounds.right},${segment.bounds.bottom}]")
                     .put("image_base64", encoded)
-                    .put("image_format", "jpeg"),
+                    .put("image_format", "jpeg")
+                    .put("ocr_text", ocrText),
             )
         }
 
+        val elapsed = System.currentTimeMillis() - pipelineStartAt
+        Log.d(
+            TAG,
+            "Vision pipeline segments=${preparedSegments.size} ocr_hits=$ocrHitCount parallelism=${configuredParallelism.coerceAtMost(preparedSegments.size.coerceAtLeast(1))} cost_ms=$elapsed",
+        )
+
         return segments
+    }
+
+    private fun runParallelOcr(
+        segments: List<PreparedVisionSegment>,
+        configuredParallelism: Int,
+    ): Map<String, String> {
+        if (segments.isEmpty()) {
+            return emptyMap()
+        }
+
+        val workerCount = OcrPipelineConfig
+            .normalizeParallelism(configuredParallelism)
+            .coerceAtMost(segments.size)
+        val executor = Executors.newFixedThreadPool(workerCount)
+        return try {
+            val futures = mutableMapOf<String, Future<String>>()
+            segments.forEach { segment ->
+                futures[segment.id] = executor.submit<String> {
+                    VisionOcrProcessor.recognizeBitmapBlocking(segment.bitmap)
+                }
+            }
+
+            futures.mapValues { (_, future) ->
+                runCatching {
+                    future.get(OCR_TASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                }.onFailure { error ->
+                    Log.w(TAG, "OCR worker timeout/failure: ${error.message}")
+                }.getOrDefault("")
+            }
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     private fun scaleDown(bitmap: Bitmap, maxEdge: Int): Bitmap {
@@ -629,6 +702,12 @@ class AmadeusAccessibilityService : AccessibilityService() {
         val bounds: Rect,
     )
 
+    private data class PreparedVisionSegment(
+        val id: String,
+        val bounds: Rect,
+        val bitmap: Bitmap,
+    )
+
     private data class CaptureWindow(
         val windowId: Int,
         val boundsInScreen: Rect,
@@ -652,6 +731,7 @@ class AmadeusAccessibilityService : AccessibilityService() {
         private const val MAX_VISION_SEGMENTS = 64
         private const val MAX_VISION_AREA_RATIO = 0.35
         private const val VISION_FILTER_LOG_SAMPLE_COUNT = 8
+        private const val OCR_TASK_TIMEOUT_MS = 1_200L
         private const val REQUEST_EVENT_TYPE = "TYPE_SNAPSHOT_REQUESTED"
         private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
     }
