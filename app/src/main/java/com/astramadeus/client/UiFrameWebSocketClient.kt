@@ -32,6 +32,7 @@ object UiFrameWebSocketClient {
         private set
 
     private val client = OkHttpClient()
+    private val connectionLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val sequence = AtomicLong(0L)
 
@@ -100,7 +101,8 @@ object UiFrameWebSocketClient {
             snapshotJson
         }
 
-        val sent = socket?.send(payload) ?: false
+        val activeSocket = synchronized(connectionLock) { socket }
+        val sent = activeSocket?.send(payload) ?: false
         if (!sent) {
             Log.w(TAG, "WS send failed; state=$connectionState")
         }
@@ -111,22 +113,30 @@ object UiFrameWebSocketClient {
             return
         }
 
-        if (connectedUrl == url && socket != null) {
-            return
+        synchronized(connectionLock) {
+            if ((connectionState == ConnectionState.CONNECTING || connectionState == ConnectionState.CONNECTED) && connectedUrl == url && socket != null) {
+                return
+            }
+
+            disconnectInternal(manual = false)
+            manuallyClosed = false
+            connectionState = ConnectionState.CONNECTING
+            lastError = null
+            connectedUrl = url
+
+            Log.i(TAG, "Connecting websocket: $url")
+            val request = Request.Builder().url(url).build()
+            socket = client.newWebSocket(request, createListener(url))
         }
-
-        disconnect(manual = false)
-        manuallyClosed = false
-        connectionState = ConnectionState.CONNECTING
-        lastError = null
-
-        Log.i(TAG, "Connecting websocket: $url")
-        val request = Request.Builder().url(url).build()
-        socket = client.newWebSocket(request, createListener(url))
-        connectedUrl = url
     }
 
     private fun disconnect(manual: Boolean) {
+        synchronized(connectionLock) {
+            disconnectInternal(manual)
+        }
+    }
+
+    private fun disconnectInternal(manual: Boolean) {
         manuallyClosed = manual
         mainHandler.removeCallbacks(reconnectTask)
         socket?.close(1000, "closed")
@@ -138,30 +148,48 @@ object UiFrameWebSocketClient {
     private fun createListener(url: String): WebSocketListener {
         return object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                connectionState = ConnectionState.CONNECTED
-                lastError = null
+                synchronized(connectionLock) {
+                    if (socket !== webSocket) {
+                        return
+                    }
+                    connectionState = ConnectionState.CONNECTED
+                    lastError = null
+                }
                 Log.i(TAG, "WebSocket connected: $url")
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                connectionState = ConnectionState.DISCONNECTED
+                synchronized(connectionLock) {
+                    if (socket === webSocket) {
+                        connectionState = ConnectionState.DISCONNECTED
+                    }
+                }
                 Log.i(TAG, "WebSocket closing code=$code reason=$reason")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                connectionState = ConnectionState.DISCONNECTED
-                socket = null
-                connectedUrl = null
+                synchronized(connectionLock) {
+                    if (socket === webSocket) {
+                        connectionState = ConnectionState.DISCONNECTED
+                        socket = null
+                        connectedUrl = null
+                    }
+                }
                 Log.i(TAG, "WebSocket closed code=$code reason=$reason")
                 scheduleReconnectIfNeeded()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                connectionState = ConnectionState.ERROR
-                lastError = t.message ?: "Unknown websocket error"
-                socket = null
-                connectedUrl = null
-                Log.w(TAG, "WebSocket failure: ${lastError}")
+                val errorText = t.message ?: "Unknown websocket error"
+                synchronized(connectionLock) {
+                    if (socket === webSocket) {
+                        connectionState = ConnectionState.ERROR
+                        lastError = errorText
+                        socket = null
+                        connectedUrl = null
+                    }
+                }
+                Log.w(TAG, "WebSocket failure: $errorText")
                 scheduleReconnectIfNeeded()
             }
         }
@@ -670,7 +698,17 @@ object UiFrameWebSocketClient {
     private fun buildFrameId(snapshot: JSONObject): String {
         val digest = MessageDigest.getInstance("SHA-256")
         val bytes = digest.digest(snapshot.toString().toByteArray(Charsets.UTF_8))
-        return bytes.joinToString(separator = "") { "%02x".format(it) }.take(16)
+        return bytes.toHexString().take(16)
+    }
+
+    private fun ByteArray.toHexString(): String {
+        val result = CharArray(size * 2)
+        for (index in indices) {
+            val value = this[index].toInt() and 0xFF
+            result[index * 2] = HEX_CHARS[value ushr 4]
+            result[index * 2 + 1] = HEX_CHARS[value and 0x0F]
+        }
+        return String(result)
     }
 
     private data class RectTuple(
@@ -706,6 +744,7 @@ object UiFrameWebSocketClient {
 
     private const val TAG = "UiFrameWebSocket"
     private const val RECONNECT_DELAY_MS = 1_500L
+    private val HEX_CHARS = "0123456789abcdef".toCharArray()
     private val BOUNDS_REGEX = Regex("\\[(-?\\d+),(-?\\d+)]\\[(-?\\d+),(-?\\d+)]")
     private const val MIN_DEDUP_TEXT_LENGTH = 2
     private const val MIN_PARENT_FOLD_TEXT_COVERAGE = 8

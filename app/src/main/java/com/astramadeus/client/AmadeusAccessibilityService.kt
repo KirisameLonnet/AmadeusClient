@@ -204,18 +204,24 @@ class AmadeusAccessibilityService : AccessibilityService() {
         val hardwareBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
         val bitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
 
-        hardwareBitmap?.recycle()
-        hardwareBuffer.close()
+        try {
+            hardwareBitmap?.recycle()
+        } finally {
+            hardwareBuffer.close()
+        }
 
         if (bitmap == null) {
             return baseSnapshot
         }
 
-        val segments = runCatching {
+        val segments = try {
             buildVisionSegments(bitmap, targets, captureWindowBounds)
-        }.getOrDefault(JSONArray())
-
-        bitmap.recycle()
+        } catch (error: Throwable) {
+            Log.w(TAG, "buildVisionSegments failed: ${error.message}")
+            JSONArray()
+        } finally {
+            bitmap.recycle()
+        }
         data.put("vision_segments", segments)
         return baseSnapshot
     }
@@ -229,68 +235,79 @@ class AmadeusAccessibilityService : AccessibilityService() {
         val segments = JSONArray()
         val preparedSegments = mutableListOf<PreparedVisionSegment>()
 
-        targets.take(MAX_VISION_SEGMENTS).forEach { target ->
-            val captureSpaceBounds = toCaptureSpace(target.bounds, captureWindowBounds)
-            val clampedCaptureBounds = Rect(
-                captureSpaceBounds.left.coerceIn(0, bitmap.width),
-                captureSpaceBounds.top.coerceIn(0, bitmap.height),
-                captureSpaceBounds.right.coerceIn(0, bitmap.width),
-                captureSpaceBounds.bottom.coerceIn(0, bitmap.height),
-            )
+        try {
+            targets.take(MAX_VISION_SEGMENTS).forEach { target ->
+                val captureSpaceBounds = toCaptureSpace(target.bounds, captureWindowBounds)
+                val clampedCaptureBounds = Rect(
+                    captureSpaceBounds.left.coerceIn(0, bitmap.width),
+                    captureSpaceBounds.top.coerceIn(0, bitmap.height),
+                    captureSpaceBounds.right.coerceIn(0, bitmap.width),
+                    captureSpaceBounds.bottom.coerceIn(0, bitmap.height),
+                )
 
-            if (clampedCaptureBounds.width() <= 0 || clampedCaptureBounds.height() <= 0) {
-                return@forEach
+                if (clampedCaptureBounds.width() <= 0 || clampedCaptureBounds.height() <= 0) {
+                    return@forEach
+                }
+
+                val crop = Bitmap.createBitmap(
+                    bitmap,
+                    clampedCaptureBounds.left,
+                    clampedCaptureBounds.top,
+                    clampedCaptureBounds.width(),
+                    clampedCaptureBounds.height(),
+                )
+
+                val normalizedCrop = try {
+                    scaleDown(crop, VISION_CROP_MAX_EDGE_PX)
+                } catch (error: Throwable) {
+                    crop.recycle()
+                    throw error
+                }
+                if (normalizedCrop !== crop) {
+                    crop.recycle()
+                }
+
+                preparedSegments += PreparedVisionSegment(
+                    id = target.id,
+                    bounds = target.bounds,
+                    bitmap = normalizedCrop,
+                )
             }
 
-            val crop = Bitmap.createBitmap(
-                bitmap,
-                clampedCaptureBounds.left,
-                clampedCaptureBounds.top,
-                clampedCaptureBounds.width(),
-                clampedCaptureBounds.height(),
-            )
+            val configuredParallelism = OcrPipelineConfig.getMaxParallelism(this)
+            val ocrResultByNodeId = runParallelOcr(preparedSegments, configuredParallelism)
+            var ocrHitCount = 0
 
-            val normalizedCrop = scaleDown(crop, VISION_CROP_MAX_EDGE_PX)
-            if (normalizedCrop !== crop) {
-                crop.recycle()
+            preparedSegments.forEach { segment ->
+                val ocrText = ocrResultByNodeId[segment.id].orEmpty()
+                if (ocrText.isNotBlank()) {
+                    ocrHitCount += 1
+                }
+
+                val averageColor = sampleAverageColor(segment.bitmap)
+
+                segments.put(
+                    JSONObject()
+                        .put("id", segment.id)
+                        .put("bounds", "[${segment.bounds.left},${segment.bounds.top}][${segment.bounds.right},${segment.bounds.bottom}]")
+                        .put("ocr_text", ocrText)
+                        .put("avg_color_rgb", JSONArray().put(averageColor.red).put(averageColor.green).put(averageColor.blue))
+                        .put("avg_color_hex", averageColor.toHexString()),
+                )
             }
 
-            preparedSegments += PreparedVisionSegment(
-                id = target.id,
-                bounds = target.bounds,
-                bitmap = normalizedCrop,
+            val elapsed = System.currentTimeMillis() - pipelineStartAt
+            Log.d(
+                TAG,
+                "Vision pipeline segments=${preparedSegments.size} ocr_hits=$ocrHitCount parallelism=${configuredParallelism.coerceAtMost(preparedSegments.size.coerceAtLeast(1))} cost_ms=$elapsed",
             )
+        } finally {
+            preparedSegments.forEach { segment ->
+                runCatching {
+                    segment.bitmap.recycle()
+                }
+            }
         }
-
-        val configuredParallelism = OcrPipelineConfig.getMaxParallelism(this)
-        val ocrResultByNodeId = runParallelOcr(preparedSegments, configuredParallelism)
-        var ocrHitCount = 0
-
-        preparedSegments.forEach { segment ->
-            val ocrText = ocrResultByNodeId[segment.id].orEmpty()
-            if (ocrText.isNotBlank()) {
-                ocrHitCount += 1
-            }
-
-            val averageColor = sampleAverageColor(segment.bitmap)
-
-            segment.bitmap.recycle()
-
-            segments.put(
-                JSONObject()
-                    .put("id", segment.id)
-                    .put("bounds", "[${segment.bounds.left},${segment.bounds.top}][${segment.bounds.right},${segment.bounds.bottom}]")
-                    .put("ocr_text", ocrText)
-                    .put("avg_color_rgb", JSONArray().put(averageColor.red).put(averageColor.green).put(averageColor.blue))
-                    .put("avg_color_hex", averageColor.toHexString()),
-            )
-        }
-
-        val elapsed = System.currentTimeMillis() - pipelineStartAt
-        Log.d(
-            TAG,
-            "Vision pipeline segments=${preparedSegments.size} ocr_hits=$ocrHitCount parallelism=${configuredParallelism.coerceAtMost(preparedSegments.size.coerceAtLeast(1))} cost_ms=$elapsed",
-        )
 
         return segments
     }
