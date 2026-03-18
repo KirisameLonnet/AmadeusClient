@@ -11,7 +11,7 @@ object OcrPipelineConfig {
     const val DEFAULT_PARALLELISM = 32
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun normalizeParallelism(value: Int): Int {
         return value.coerceIn(MIN_PARALLELISM, MAX_PARALLELISM)

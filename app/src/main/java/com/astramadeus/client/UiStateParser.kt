@@ -4,7 +4,6 @@ import android.graphics.Rect
 import org.json.JSONObject
 
 object UiStateParser {
-    private val boundsRegex = Regex("\\[(-?\\d+),(-?\\d+)]\\[(-?\\d+),(-?\\d+)]")
 
     fun parse(rawSnapshot: String): UiStatePreview? {
         return runCatching {
@@ -74,12 +73,5 @@ object UiStateParser {
         }.getOrNull()
     }
 
-    private fun parseBounds(value: String): Rect? {
-        val match = boundsRegex.matchEntire(value) ?: return null
-        val left = match.groupValues[1].toInt()
-        val top = match.groupValues[2].toInt()
-        val right = match.groupValues[3].toInt()
-        val bottom = match.groupValues[4].toInt()
-        return Rect(left, top, right, bottom)
-    }
+    private fun parseBounds(value: String): Rect? = BoundsParser.parse(value)
 }

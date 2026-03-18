@@ -14,11 +14,14 @@ import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import com.astramadeus.client.ui.MainApp
 import com.astramadeus.client.ui.theme.AmadeusTheme
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.util.Timer
-import java.util.TimerTask
 
 class MainActivity : ComponentActivity() {
 
@@ -35,7 +38,7 @@ class MainActivity : ComponentActivity() {
     private val _maxPullRateHz = MutableStateFlow(1.0f)
     val maxPullRateHz: StateFlow<Float> = _maxPullRateHz.asStateFlow()
 
-    private var statusTimer: Timer? = null
+    private var statusJob: Job? = null
     private var lastSnapshotRequestAt: Long = 0L
 
     private val snapshotReceiver = object : BroadcastReceiver() {
@@ -147,23 +150,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startStatusTimer() {
-        stopStatusTimer() // 确保之前的定时器已停止
-        statusTimer = Timer()
-        statusTimer?.scheduleAtFixedRate(
-            object : TimerTask() {
-                override fun run() {
-                    runOnUiThread {
-                        refreshStatus()
-                    }
-                }
-            },
-            0,
-            statusRefreshIntervalMs
-        )
+        stopStatusTimer()
+        statusJob = lifecycleScope.launch {
+            while (isActive) {
+                refreshStatus()
+                delay(statusRefreshIntervalMs)
+            }
+        }
     }
 
     private fun stopStatusTimer() {
-        statusTimer?.cancel()
-        statusTimer = null
+        statusJob?.cancel()
+        statusJob = null
     }
 }
