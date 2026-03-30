@@ -34,6 +34,14 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        jniLibs {
+            // OcrLibrary AAR bundles libonnxruntime.so v1.14.0.
+            // Maven onnxruntime-android provides Java API for PaddleOCR.
+            // pickFirst ensures the AAR's v1.14.0 .so wins over Maven's v1.17.0.
+            pickFirsts += setOf("**/libonnxruntime.so")
+        }
+    }
 }
 
 dependencies {
@@ -53,6 +61,12 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.okhttp)
     implementation(libs.mlkit.text.recognition.chinese)
+    // ONNX Runtime: Java API used by PaddleOcrEngine.
+    // Native .so from Maven is excluded via pickFirst — AAR's bundled v1.14.0 is used.
+    // GLM-OCR disabled — see third_party/RapidOcrAndroidOnnx/README.md.
+    implementation(libs.onnxruntime.android)
+    // OcrLibrary AAR: provides libRapidOcr.so + libonnxruntime.so (v1.14.0, bundled).
+    implementation(fileTree("libs") { include("*.aar") })
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

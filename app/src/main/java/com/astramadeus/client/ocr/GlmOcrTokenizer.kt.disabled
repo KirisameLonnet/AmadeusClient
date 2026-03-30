@@ -1,0 +1,180 @@
+package com.astramadeus.client.ocr
+
+import android.content.Context
+import android.util.Log
+import org.json.JSONObject
+import java.io.File
+
+/**
+ * Minimal BPE tokenizer for GLM-OCR, loaded from HuggingFace `tokenizer.json`.
+ *
+ * Supports:
+ * - encode(text) → token IDs (for building decoder prompt)
+ * - decode(ids) → text (for decoding generated output)
+ *
+ * This is a simplified implementation sufficient for GLM-OCR's
+ * text recognition prompt ("Text Recognition:") and output decoding.
+ */
+class GlmOcrTokenizer private constructor(
+    private val vocab: Map<String, Int>,
+    private val reverseVocab: Map<Int, String>,
+    private val merges: List<Pair<String, String>>,
+) {
+    /**
+     * Encode text into token IDs using the BPE vocabulary.
+     * Simplified: looks up whole tokens, falls back to byte-level encoding.
+     */
+    fun encode(text: String): List<Int> {
+        // For GLM-OCR we primarily need to encode the fixed prompt tokens.
+        // Use a simplified greedy longest-match tokenization.
+        val tokens = mutableListOf<Int>()
+        var i = 0
+        while (i < text.length) {
+            var bestLen = 0
+            var bestId = -1
+
+            // Try matching longest token first
+            val maxLen = minOf(text.length - i, 20)
+            for (len in maxLen downTo 1) {
+                val sub = text.substring(i, i + len)
+                val id = vocab[sub]
+                if (id != null) {
+                    bestLen = len
+                    bestId = id
+                    break
+                }
+            }
+
+            if (bestId >= 0) {
+                tokens.add(bestId)
+                i += bestLen
+            } else {
+                // Fallback: encode as UTF-8 byte tokens
+                val byte = text[i].code
+                val byteToken = vocab["<0x${byte.toString(16).uppercase().padStart(2, '0')}>"]
+                if (byteToken != null) {
+                    tokens.add(byteToken)
+                } else {
+                    Log.w(TAG, "Unknown character at position $i: '${text[i]}'")
+                }
+                i++
+            }
+        }
+        return tokens
+    }
+
+    /**
+     * Decode token IDs back to text.
+     * Consecutive byte-level tokens (<0xE4> etc.) are buffered and decoded
+     * together as a single UTF-8 byte sequence. This is essential for
+     * multi-byte characters such as CJK (Chinese/Japanese/Korean).
+     */
+    fun decode(ids: List<Int>, skipSpecialTokens: Boolean = true): String {
+        val sb = StringBuilder()
+        val byteBuffer = mutableListOf<Byte>()
+
+        fun flushBytes() {
+            if (byteBuffer.isNotEmpty()) {
+                sb.append(String(byteBuffer.toByteArray(), Charsets.UTF_8))
+                byteBuffer.clear()
+            }
+        }
+
+        for (id in ids) {
+            if (skipSpecialTokens && id in SPECIAL_TOKEN_IDS) {
+                flushBytes()
+                continue
+            }
+            val token = reverseVocab[id] ?: run { flushBytes(); continue }
+
+            // Handle byte-level tokens like <0xE4>
+            if (token.startsWith("<0x") && token.endsWith(">")) {
+                val byteVal = token.substring(3, token.length - 1).toIntOrNull(16)
+                if (byteVal != null) {
+                    byteBuffer.add(byteVal.toByte())
+                }
+            } else {
+                flushBytes()
+                // SentencePiece style: '▁' = space
+                sb.append(token.replace("▁", " "))
+            }
+        }
+        flushBytes()
+        return sb.toString()
+    }
+
+    companion object {
+        private const val TAG = "GlmOcrTokenizer"
+
+        // Special tokens from config.json
+        const val EOS_TOKEN_ID = 59246
+        const val PAD_TOKEN_ID = 59246
+        const val IMAGE_START_TOKEN_ID = 59256
+        const val IMAGE_END_TOKEN_ID = 59257
+        const val IMAGE_TOKEN_ID = 59280
+
+        private val SPECIAL_TOKEN_IDS = setOf(
+            EOS_TOKEN_ID, IMAGE_START_TOKEN_ID, IMAGE_END_TOKEN_ID,
+            IMAGE_TOKEN_ID, 59253, // second EOS
+        )
+
+        /**
+         * Load tokenizer from the model directory containing `tokenizer.json`.
+         */
+        fun load(modelDir: File): GlmOcrTokenizer? {
+            val tokenizerFile = File(modelDir, "tokenizer.json")
+            if (!tokenizerFile.exists()) {
+                Log.w(TAG, "tokenizer.json not found in $modelDir")
+                return null
+            }
+
+            return try {
+                val json = JSONObject(tokenizerFile.readText())
+                val model = json.getJSONObject("model")
+                val vocabObj = model.getJSONObject("vocab")
+
+                // Build vocab map
+                val vocab = mutableMapOf<String, Int>()
+                val reverseVocab = mutableMapOf<Int, String>()
+                val keys = vocabObj.keys()
+                while (keys.hasNext()) {
+                    val token = keys.next()
+                    val id = vocabObj.getInt(token)
+                    vocab[token] = id
+                    reverseVocab[id] = token
+                }
+
+                // Load added_tokens (special tokens)
+                val addedTokens = json.optJSONArray("added_tokens")
+                if (addedTokens != null) {
+                    for (i in 0 until addedTokens.length()) {
+                        val entry = addedTokens.getJSONObject(i)
+                        val content = entry.getString("content")
+                        val id = entry.getInt("id")
+                        vocab[content] = id
+                        reverseVocab[id] = content
+                    }
+                }
+
+                // Load merges
+                val mergesArray = model.optJSONArray("merges")
+                val merges = mutableListOf<Pair<String, String>>()
+                if (mergesArray != null) {
+                    for (i in 0 until mergesArray.length()) {
+                        val merge = mergesArray.getString(i)
+                        val parts = merge.split(" ", limit = 2)
+                        if (parts.size == 2) {
+                            merges.add(parts[0] to parts[1])
+                        }
+                    }
+                }
+
+                Log.i(TAG, "Tokenizer loaded: ${vocab.size} tokens, ${merges.size} merges")
+                GlmOcrTokenizer(vocab, reverseVocab, merges)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load tokenizer: ${e.message}", e)
+                null
+            }
+        }
+    }
+}

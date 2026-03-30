@@ -52,11 +52,49 @@ object FrameSanitizer {
             compactNodes += compactNode
         }
 
+        // Overlay / popup ad detection
+        val hasMultipleWindows = data.optBoolean("has_multiple_windows", false)
+        val overlayResult = OverlayDetector.detect(elements, screenBounds, hasMultipleWindows)
+        if (overlayResult != null) {
+            compactNodes.forEach { node ->
+                if (node.id == overlayResult.closeButtonNodeId) {
+                    node.payload.put("semantic_hint", "popup_close")
+                } else if (node.id in overlayResult.overlayNodeIds) {
+                    // Only override if no existing hint
+                    if (!node.payload.has("semantic_hint")) {
+                        node.payload.put("semantic_hint", "popup_ad")
+                    }
+                }
+            }
+            data.put("overlay_detected", true)
+            overlayResult.overlayBounds?.let { bounds ->
+                data.put("overlay_bounds", "[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]")
+            }
+            overlayResult.closeButtonNodeId?.let { data.put("overlay_close_node_id", it) }
+        }
+
         val compactElements = JSONArray()
         foldSemanticDuplicates(compactNodes).forEach { compactElements.put(it.payload) }
 
         data.put("elements", compactElements)
-        data.remove("vision_segments")
+
+        // Preserve full-page OCR segments (not matched to any tree node)
+        if (segments != null) {
+            val fullPageSegments = JSONArray()
+            for (index in 0 until segments.length()) {
+                val segment = segments.optJSONObject(index) ?: continue
+                if (segment.optString("source") == "fullpage_ocr") {
+                    fullPageSegments.put(segment)
+                }
+            }
+            if (fullPageSegments.length() > 0) {
+                data.put("vision_segments", fullPageSegments)
+            } else {
+                data.remove("vision_segments")
+            }
+        } else {
+            data.remove("vision_segments")
+        }
 
         return snapshot
     }
@@ -86,7 +124,8 @@ object FrameSanitizer {
             node.optBoolean("is_clickable") ||
                 node.optBoolean("is_scrollable") ||
                 node.optBoolean("is_editable") ||
-                node.optBoolean("is_focusable")
+                node.optBoolean("is_focusable") ||
+                node.optBoolean("is_long_clickable")
         val bounds = BoundsParser.parseToTuple(node.optString("bounds"))
         val shortClassName = shortenClassName(node.optString("class_name"))
         val shortResourceId = shortenResourceId(node.optString("resource_id"))
@@ -110,9 +149,11 @@ object FrameSanitizer {
             return null
         }
 
+        val isVisualClass = shortClassName in VISUAL_CLASS_NAMES
         val isLowValueNode =
             displayText.isBlank() &&
                 !isActionable &&
+                !isVisualClass &&
                 shortResourceId.isBlank() &&
                 node.optInt("child_count") <= 1
         if (isLowValueNode) {
@@ -120,7 +161,11 @@ object FrameSanitizer {
         }
 
         if (displayText.isBlank() && !isActionable && isGenericContainer && semanticHint == null) {
-            return null
+            val area = bounds?.let { (it.right - it.left).toLong() * (it.bottom - it.top).toLong() } ?: 0L
+            val isNegligible = area < CONTAINER_MIN_AREA || node.optInt("child_count") == 0
+            if (isNegligible) {
+                return null
+            }
         }
 
         val compact = JSONObject()
@@ -139,6 +184,9 @@ object FrameSanitizer {
             .put("is_focusable", node.optBoolean("is_focusable"))
             .put("is_selected", node.optBoolean("is_selected"))
             .put("is_visible_to_user", isVisible)
+            .put("is_checkable", node.optBoolean("is_checkable"))
+            .put("is_checked", node.optBoolean("is_checked"))
+            .put("is_long_clickable", node.optBoolean("is_long_clickable"))
 
         if (isIconLikeAction) {
             compact.put("icon_button", true)
@@ -154,8 +202,8 @@ object FrameSanitizer {
 
         bounds?.let { rect ->
             if (isActionable) {
-                val tapX = rect.first + ((rect.third - rect.first) / 2)
-                val tapY = rect.second + ((rect.fourth - rect.second) / 2)
+                val tapX = rect.left + ((rect.right - rect.left) / 2)
+                val tapY = rect.top + ((rect.bottom - rect.top) / 2)
                 compact.put("tap_point", JSONArray().put(tapX).put(tapY))
             }
         }
@@ -270,10 +318,10 @@ object FrameSanitizer {
         return nodes
             .groupBy { node ->
                 listOf(
-                    node.bounds?.first,
-                    node.bounds?.second,
-                    node.bounds?.third,
-                    node.bounds?.fourth,
+                    node.bounds?.left,
+                    node.bounds?.top,
+                    node.bounds?.right,
+                    node.bounds?.bottom,
                     node.normalizedDisplayText,
                     node.textSource,
                 ).joinToString("|")
@@ -341,10 +389,10 @@ object FrameSanitizer {
         if (child == null || parent == null) {
             return false
         }
-        return child.first >= parent.first &&
-            child.second >= parent.second &&
-            child.third <= parent.third &&
-            child.fourth <= parent.fourth
+        return child.left >= parent.left &&
+            child.top >= parent.top &&
+            child.right <= parent.right &&
+            child.bottom <= parent.bottom
     }
 
     private fun isMostlyInside(child: RectTuple?, parent: RectTuple?): Boolean {
@@ -360,15 +408,15 @@ object FrameSanitizer {
     }
 
     private fun rectArea(rect: RectTuple): Long {
-        return (rect.third - rect.first).toLong().coerceAtLeast(0L) *
-            (rect.fourth - rect.second).toLong().coerceAtLeast(0L)
+        return (rect.right - rect.left).toLong().coerceAtLeast(0L) *
+            (rect.bottom - rect.top).toLong().coerceAtLeast(0L)
     }
 
     private fun intersectionArea(first: RectTuple, second: RectTuple): Long {
-        val left = maxOf(first.first, second.first)
-        val top = maxOf(first.second, second.second)
-        val right = minOf(first.third, second.third)
-        val bottom = minOf(first.fourth, second.fourth)
+        val left = maxOf(first.left, second.left)
+        val top = maxOf(first.top, second.top)
+        val right = minOf(first.right, second.right)
+        val bottom = minOf(first.bottom, second.bottom)
         if (right <= left || bottom <= top) {
             return 0L
         }
@@ -422,21 +470,7 @@ object FrameSanitizer {
     }
 
     private fun parseScreenBounds(elements: JSONArray): RectTuple? {
-        var left = Int.MAX_VALUE
-        var top = Int.MAX_VALUE
-        var right = Int.MIN_VALUE
-        var bottom = Int.MIN_VALUE
-        var found = false
-        for (index in 0 until elements.length()) {
-            val node = elements.optJSONObject(index) ?: continue
-            val rect = BoundsParser.parseToTuple(node.optString("bounds")) ?: continue
-            left = minOf(left, rect.first)
-            top = minOf(top, rect.second)
-            right = maxOf(right, rect.third)
-            bottom = maxOf(bottom, rect.fourth)
-            found = true
-        }
-        return if (found) RectTuple(left, top, right, bottom) else null
+        return BoundsParser.parseScreenBoundsFromElements(elements)
     }
 
     private fun inferSemanticHint(
@@ -477,9 +511,9 @@ object FrameSanitizer {
         if ("cart" in lookup) return "cart"
         if ("mine" in lookup || "profile" in lookup || "me" in lookup) return "profile"
 
-        val screenWidth = (screenBounds.third - screenBounds.first).coerceAtLeast(1)
-        val centerX = (bounds.first + bounds.third) / 2f
-        val normalizedX = (centerX - screenBounds.first) / screenWidth.toFloat()
+        val screenWidth = (screenBounds.right - screenBounds.left).coerceAtLeast(1)
+        val centerX = (bounds.left + bounds.right) / 2f
+        val normalizedX = (centerX - screenBounds.left) / screenWidth.toFloat()
         return when {
             normalizedX < 0.2f -> "home"
             normalizedX < 0.4f -> "promo"
@@ -493,30 +527,30 @@ object FrameSanitizer {
         if (!isActionable || bounds == null || displayText.isNotBlank()) {
             return false
         }
-        val width = (bounds.third - bounds.first).coerceAtLeast(0)
-        val height = (bounds.fourth - bounds.second).coerceAtLeast(0)
+        val width = (bounds.right - bounds.left).coerceAtLeast(0)
+        val height = (bounds.bottom - bounds.top).coerceAtLeast(0)
         if (width == 0 || height == 0) {
             return false
         }
         val area = width.toLong() * height.toLong()
         val ratio = width.toFloat() / height.toFloat()
-        return area in 1_600L..40_000L && ratio in 0.55f..1.8f
+        return area in ICON_MIN_AREA..ICON_MAX_AREA && ratio in ICON_MIN_ASPECT..ICON_MAX_ASPECT
     }
 
     private fun isTopToolbarZone(bounds: RectTuple, screenBounds: RectTuple): Boolean {
-        return bounds.second <= screenBounds.second + ((screenBounds.fourth - screenBounds.second) * 0.22f).toInt()
+        return bounds.top <= screenBounds.top + ((screenBounds.bottom - screenBounds.top) * TOP_TOOLBAR_ZONE_RATIO).toInt()
     }
 
     private fun isRightToolbarZone(bounds: RectTuple, screenBounds: RectTuple): Boolean {
-        return bounds.first >= screenBounds.first + ((screenBounds.third - screenBounds.first) * 0.72f).toInt()
+        return bounds.left >= screenBounds.left + ((screenBounds.right - screenBounds.left) * RIGHT_TOOLBAR_ZONE_RATIO).toInt()
     }
 
     private fun isLeftToolbarZone(bounds: RectTuple, screenBounds: RectTuple): Boolean {
-        return bounds.third <= screenBounds.first + ((screenBounds.third - screenBounds.first) * 0.28f).toInt()
+        return bounds.right <= screenBounds.left + ((screenBounds.right - screenBounds.left) * LEFT_TOOLBAR_ZONE_RATIO).toInt()
     }
 
     private fun isBottomNavigationZone(bounds: RectTuple, screenBounds: RectTuple): Boolean {
-        return bounds.second >= screenBounds.second + ((screenBounds.fourth - screenBounds.second) * 0.82f).toInt()
+        return bounds.top >= screenBounds.top + ((screenBounds.bottom - screenBounds.top) * BOTTOM_NAV_ZONE_RATIO).toInt()
     }
 
     private data class CompactTransportNode(
@@ -544,7 +578,17 @@ object FrameSanitizer {
     }
 
     private const val MIN_DEDUP_TEXT_LENGTH = 2
-    private const val MIN_PARENT_FOLD_TEXT_COVERAGE = 8
-    private const val PARENT_FOLD_RATIO = 0.45f
+    private const val MIN_PARENT_FOLD_TEXT_COVERAGE = 15
+    private const val PARENT_FOLD_RATIO = 0.70f
     private const val EMPTY_CLICKABLE_VIEW_MAX_AREA = 48_000L
+    private const val CONTAINER_MIN_AREA = 5_000L
+    private const val ICON_MIN_AREA = 1_600L
+    private const val ICON_MAX_AREA = 40_000L
+    private const val ICON_MIN_ASPECT = 0.55f
+    private const val ICON_MAX_ASPECT = 1.8f
+    private const val TOP_TOOLBAR_ZONE_RATIO = 0.22f
+    private const val RIGHT_TOOLBAR_ZONE_RATIO = 0.72f
+    private const val LEFT_TOOLBAR_ZONE_RATIO = 0.28f
+    private const val BOTTOM_NAV_ZONE_RATIO = 0.82f
+    private val VISUAL_CLASS_NAMES = setOf("image", "web", "button")
 }

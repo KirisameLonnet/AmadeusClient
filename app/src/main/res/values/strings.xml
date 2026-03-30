@@ -40,6 +40,16 @@
     <string name="ocr_settings_title">OCR pipeline settings</string>
     <string name="ocr_parallelism_label">OCR parallelism: %1$d</string>
     <string name="ocr_parallelism_hint">Higher values increase throughput but may raise heat and jitter. Current range supports up to 32.</string>
+    <string name="ocr_engine_section_title">OCR engine</string>
+    <string name="ocr_engine_active">Active</string>
+    <string name="ocr_engine_builtin">Built-in</string>
+    <string name="ocr_engine_download">Download models (%1$d MB)</string>
+    <string name="ocr_engine_downloading">Downloading… %1$d%%</string>
+    <string name="ocr_engine_downloaded">Models ready</string>
+    <string name="ocr_engine_download_error">Download failed: %1$s</string>
+    <string name="ocr_engine_delete_models">Delete models</string>
+    <string name="ocr_engine_unavailable">Models not downloaded</string>
+    <string name="ocr_engine_requires_aar">Requires manual AAR installation</string>
     <string name="vision_assist_selected_count">%1$d selected</string>
     <string name="vision_assist_menu">Vision assist options</string>
     <string name="sort_app_name_asc">Sort: App name A-Z</string>
@@ -52,4 +62,17 @@
     <string name="tools_drawer_title">Debug Tools</string>
     <string name="expand_tools">Expand tools panel</string>
     <string name="collapse_tools">Collapse tools panel</string>
+    <string name="glm_ocr_engine_download">Download models (%1$d MB)</string>
+    <string name="glm_ocr_engine_downloading">Downloading… %1$d%%</string>
+    <string name="glm_ocr_engine_downloaded">Models ready</string>
+    <string name="glm_ocr_engine_download_error">Download failed: %1$s</string>
+    <string name="glm_ocr_engine_delete">Delete models</string>
+    <string name="glm_ocr_engine_not_downloaded">Models not downloaded</string>
+    <string name="ocr_settings_default_engine">Default OCR Engine</string>
+    <string name="ocr_settings_fallback_engine">Fallback OCR Engine</string>
+    <string name="ocr_settings_default_engine_desc">Per-node text recognition</string>
+    <string name="ocr_settings_fallback_engine_desc">Full-page OCR when accessibility tree is sparse</string>
+    <string name="ocr_gpu_toggle">GPU acceleration</string>
+    <string name="ocr_gpu_toggle_desc">Use NNAPI hardware acceleration (GPU/NPU). Falls back to CPU if unavailable.</string>
+    <string name="ocr_gpu_toggle_reinit">Engines will re-initialize with new setting</string>
 </resources>

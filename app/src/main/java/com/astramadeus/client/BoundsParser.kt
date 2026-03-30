@@ -1,6 +1,7 @@
 package com.astramadeus.client
 
 import android.graphics.Rect
+import org.json.JSONArray
 
 object BoundsParser {
     private val BOUNDS_REGEX = Regex("\\[(-?\\d+),(-?\\d+)]\\[(-?\\d+),(-?\\d+)]")
@@ -17,17 +18,39 @@ object BoundsParser {
     fun parseToTuple(value: String): RectTuple? {
         val match = BOUNDS_REGEX.matchEntire(value) ?: return null
         return RectTuple(
-            first = match.groupValues[1].toInt(),
-            second = match.groupValues[2].toInt(),
-            third = match.groupValues[3].toInt(),
-            fourth = match.groupValues[4].toInt(),
+            left = match.groupValues[1].toInt(),
+            top = match.groupValues[2].toInt(),
+            right = match.groupValues[3].toInt(),
+            bottom = match.groupValues[4].toInt(),
         )
     }
 
     data class RectTuple(
-        val first: Int,
-        val second: Int,
-        val third: Int,
-        val fourth: Int,
+        val left: Int,
+        val top: Int,
+        val right: Int,
+        val bottom: Int,
     )
+
+    /**
+     * Parse screen bounds from a JSON elements array by computing the
+     * bounding box of all elements with parseable bounds.
+     */
+    fun parseScreenBoundsFromElements(elements: JSONArray): RectTuple? {
+        var left = Int.MAX_VALUE
+        var top = Int.MAX_VALUE
+        var right = Int.MIN_VALUE
+        var bottom = Int.MIN_VALUE
+        var found = false
+        for (index in 0 until elements.length()) {
+            val node = elements.optJSONObject(index) ?: continue
+            val rect = parseToTuple(node.optString("bounds")) ?: continue
+            left = minOf(left, rect.left)
+            top = minOf(top, rect.top)
+            right = maxOf(right, rect.right)
+            bottom = maxOf(bottom, rect.bottom)
+            found = true
+        }
+        return if (found) RectTuple(left, top, right, bottom) else null
+    }
 }

@@ -1,0 +1,36 @@
+package com.astramadeus.client.ocr
+
+/**
+ * Downloads GLM-OCR ONNX model files from HuggingFace.
+ * Models are stored in `filesDir/glm_ocr_models/`.
+ *
+ * Required files:
+ * - vision_encoder_q4.onnx (+.onnx_data)
+ * - embed_tokens_q4.onnx (+.onnx_data)
+ * - decoder_model_merged_q4.onnx (+.onnx_data)
+ * - tokenizer.json         (BPE tokenizer vocabulary)
+ * - config.json            (model configuration)
+ */
+object GlmOcrModelDownloader : BaseModelDownloader() {
+
+    override val tag = "GlmOcrModelDl"
+    override val modelDirName = "glm_ocr_models"
+    override val readyMarker = ".ready"
+    override val connectTimeoutMs = 15_000
+    override val readTimeoutMs = 120_000  // Larger models need more time
+    override val estimatedTotalSizeMb = 740
+
+    private const val BASE_URL = "https://huggingface.co/onnx-community/GLM-OCR-ONNX/resolve/main"
+    private const val ONNX_DIR_URL = "$BASE_URL/onnx"
+
+    override val modelFiles: Map<String, String> = linkedMapOf(
+        "vision_encoder_q4.onnx" to "$ONNX_DIR_URL/vision_encoder_q4.onnx",
+        "vision_encoder_q4.onnx_data" to "$ONNX_DIR_URL/vision_encoder_q4.onnx_data",
+        "embed_tokens_q4.onnx" to "$ONNX_DIR_URL/embed_tokens_q4.onnx",
+        "embed_tokens_q4.onnx_data" to "$ONNX_DIR_URL/embed_tokens_q4.onnx_data",
+        "decoder_model_merged_q4.onnx" to "$ONNX_DIR_URL/decoder_model_merged_q4.onnx",
+        "decoder_model_merged_q4.onnx_data" to "$ONNX_DIR_URL/decoder_model_merged_q4.onnx_data",
+        "tokenizer.json" to "$BASE_URL/tokenizer.json",
+        "config.json" to "$BASE_URL/config.json",
+    )
+}

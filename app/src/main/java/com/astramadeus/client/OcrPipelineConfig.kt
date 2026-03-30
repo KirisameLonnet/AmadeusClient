@@ -5,10 +5,12 @@ import android.content.Context
 object OcrPipelineConfig {
     private const val PREFS_NAME = "amadeus_ocr_pipeline"
     private const val KEY_MAX_PARALLELISM = "max_parallelism"
+    private const val KEY_USE_GPU = "use_gpu"
 
     const val MIN_PARALLELISM = 1
-    const val MAX_PARALLELISM = 32
-    const val DEFAULT_PARALLELISM = 32
+    const val MAX_PARALLELISM = 12
+    val DEFAULT_PARALLELISM: Int
+        get() = Runtime.getRuntime().availableProcessors().coerceIn(MIN_PARALLELISM, 8)
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -27,5 +29,13 @@ object OcrPipelineConfig {
             .edit()
             .putInt(KEY_MAX_PARALLELISM, normalizeParallelism(value))
             .apply()
+    }
+
+    fun getUseGpu(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_USE_GPU, false)
+    }
+
+    fun setUseGpu(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_USE_GPU, enabled).apply()
     }
 }

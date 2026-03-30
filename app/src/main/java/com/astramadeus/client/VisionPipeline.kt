@@ -5,9 +5,12 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
 import android.util.Log
-import java.util.concurrent.Executors
+import com.astramadeus.client.ocr.OcrEngineRegistry
+import com.astramadeus.client.ocr.RapidOcrEngine
+import com.astramadeus.client.ocr.DetectedTextBlock
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -126,6 +129,7 @@ object VisionPipeline {
         bitmap: Bitmap,
         targets: List<VisionTarget>,
         captureWindowBounds: Rect?,
+        cancelled: AtomicBoolean = AtomicBoolean(false),
     ): JSONArray {
         val pipelineStartAt = System.currentTimeMillis()
         val segments = JSONArray()
@@ -133,6 +137,10 @@ object VisionPipeline {
 
         try {
             targets.take(MAX_VISION_SEGMENTS).forEach { target ->
+                if (cancelled.get()) {
+                    Log.d(TAG, "Vision pipeline cancelled during crop preparation")
+                    return JSONArray()
+                }
                 val captureSpaceBounds = toCaptureSpace(target.bounds, captureWindowBounds)
                 val clampedCaptureBounds = Rect(
                     captureSpaceBounds.left.coerceIn(0, bitmap.width),
@@ -171,7 +179,7 @@ object VisionPipeline {
             }
 
             val configuredParallelism = OcrPipelineConfig.getMaxParallelism(context)
-            val ocrResultByNodeId = runParallelOcr(preparedSegments, configuredParallelism)
+            val ocrResultByNodeId = runParallelOcr(context, preparedSegments, configuredParallelism, cancelled)
             var ocrHitCount = 0
 
             preparedSegments.forEach { segment ->
@@ -208,35 +216,137 @@ object VisionPipeline {
         return segments
     }
 
+    /**
+     * Full-page OCR fallback for sparse accessibility trees.
+     * Uses an engine that supports det+cls+rec to scan the entire screenshot.
+     */
+    fun buildFullPageOcrSegments(
+        context: Context,
+        bitmap: Bitmap,
+        cancelled: AtomicBoolean = AtomicBoolean(false),
+    ): JSONArray {
+        val startAt = System.currentTimeMillis()
+
+        if (cancelled.get()) return JSONArray()
+
+        // Use the dedicated fallback engine for full-page detection
+        val engine = OcrEngineRegistry.getFallbackEngine(context)
+
+        if (engine == null) {
+            Log.d(TAG, "No fallback engine available for full-page detection")
+            return JSONArray()
+        }
+
+        val scaledBitmap = scaleDown(bitmap, FULLPAGE_MAX_EDGE_PX)
+        val scaleX = bitmap.width.toFloat() / scaledBitmap.width.toFloat()
+        val scaleY = bitmap.height.toFloat() / scaledBitmap.height.toFloat()
+
+        val textBlocks = try {
+            engine.detectFullPage(scaledBitmap)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Full-page OCR failed: ${e.message}")
+            emptyList()
+        } finally {
+            if (scaledBitmap !== bitmap) {
+                scaledBitmap.recycle()
+            }
+        }
+
+        val segments = JSONArray()
+        var index = 0
+        textBlocks.forEach { block ->
+            if (block.text.isBlank()) return@forEach
+
+            // Scale bounds back to original bitmap coordinates
+            val scaledBounds = android.graphics.Rect(
+                (block.bounds.left * scaleX).toInt(),
+                (block.bounds.top * scaleY).toInt(),
+                (block.bounds.right * scaleX).toInt(),
+                (block.bounds.bottom * scaleY).toInt(),
+            )
+
+            segments.put(
+                JSONObject()
+                    .put("id", "fullpage_ocr_$index")
+                    .put("bounds", "[${scaledBounds.left},${scaledBounds.top}][${scaledBounds.right},${scaledBounds.bottom}]")
+                    .put("ocr_text", block.text)
+                    .put("score", block.score)
+                    .put("source", "fullpage_ocr"),
+            )
+            index++
+        }
+
+        val elapsed = System.currentTimeMillis() - startAt
+        Log.d(TAG, "Full-page OCR: engine=${engine.displayName} blocks=${segments.length()} cost_ms=$elapsed")
+        return segments
+    }
+
     private fun runParallelOcr(
+        context: Context,
         segments: List<PreparedVisionSegment>,
         configuredParallelism: Int,
+        cancelled: AtomicBoolean = AtomicBoolean(false),
     ): Map<String, String> {
         if (segments.isEmpty()) {
             return emptyMap()
         }
 
+        val engine = OcrEngineRegistry.getActiveEngine(context)
         val workerCount = OcrPipelineConfig
             .normalizeParallelism(configuredParallelism)
             .coerceAtMost(segments.size)
-        val executor = Executors.newFixedThreadPool(workerCount)
-        return try {
-            val futures = mutableMapOf<String, Future<String>>()
-            segments.forEach { segment ->
-                futures[segment.id] = executor.submit<String> {
-                    VisionOcrProcessor.recognizeBitmapBlocking(segment.bitmap)
-                }
-            }
 
-            futures.mapValues { (_, future) ->
-                runCatching {
-                    future.get(OCR_TASK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                }.onFailure { error ->
-                    Log.w(TAG, "OCR worker timeout/failure: ${error.message}")
-                }.getOrDefault("")
+        // Ensure RapidOCR engine pool has enough instances for the requested parallelism
+        if (engine is RapidOcrEngine) {
+            engine.ensurePoolSize(workerCount)
+        }
+
+        // Use persistent shared pool — never shut it down.
+        // OpenMP initializes TLS on each thread that calls into native code.
+        // When that Java thread is destroyed, OpenMP's __kmp_internal_end_thread
+        // crashes in ___kmp_free. By reusing threads, we avoid this.
+        val executor = ocrExecutor
+        val deadlineAt = System.currentTimeMillis() + PARALLEL_OCR_DEADLINE_MS
+        if (cancelled.get()) return emptyMap()
+
+        val futures = mutableMapOf<String, Future<String>>()
+        segments.forEach { segment ->
+            futures[segment.id] = executor.submit<String> {
+                if (cancelled.get()) return@submit ""
+                engine.recognizeBitmap(segment.bitmap)
             }
-        } finally {
-            executor.shutdownNow()
+        }
+
+        if (cancelled.get()) {
+            futures.values.forEach { it.cancel(true) }
+            return emptyMap()
+        }
+
+        var completedCount = 0
+        return futures.mapValues { (_, future) ->
+            if (cancelled.get()) {
+                future.cancel(true)
+                return@mapValues ""
+            }
+            // Enforce total wall-clock deadline so 37 sequential gets
+            // can't block for 37 × 1200ms = 44s
+            val remaining = deadlineAt - System.currentTimeMillis()
+            if (remaining <= 0) {
+                future.cancel(true)
+                return@mapValues ""
+            }
+            val timeout = remaining.coerceAtMost(OCR_TASK_TIMEOUT_MS)
+            runCatching {
+                future.get(timeout, TimeUnit.MILLISECONDS)
+            }.onSuccess {
+                completedCount++
+            }.onFailure { error ->
+                Log.w(TAG, "OCR worker timeout/failure: ${error.message}")
+            }.getOrDefault("")
+        }.also {
+            if (completedCount < segments.size) {
+                Log.d(TAG, "OCR deadline: completed $completedCount/${segments.size} segments within ${PARALLEL_OCR_DEADLINE_MS}ms")
+            }
         }
     }
 
@@ -287,25 +397,8 @@ object VisionPipeline {
     }
 
     private fun parseBoundsFromSnapshot(elements: JSONArray): Rect? {
-        var minLeft = Int.MAX_VALUE
-        var minTop = Int.MAX_VALUE
-        var maxRight = Int.MIN_VALUE
-        var maxBottom = Int.MIN_VALUE
-
-        for (index in 0 until elements.length()) {
-            val node = elements.optJSONObject(index) ?: continue
-            val bounds = BoundsParser.parse(node.optString("bounds")) ?: continue
-            minLeft = minOf(minLeft, bounds.left)
-            minTop = minOf(minTop, bounds.top)
-            maxRight = maxOf(maxRight, bounds.right)
-            maxBottom = maxOf(maxBottom, bounds.bottom)
-        }
-
-        if (minLeft == Int.MAX_VALUE || minTop == Int.MAX_VALUE || maxRight <= minLeft || maxBottom <= minTop) {
-            return null
-        }
-
-        return Rect(minLeft, minTop, maxRight, maxBottom)
+        val tuple = BoundsParser.parseScreenBoundsFromElements(elements) ?: return null
+        return Rect(tuple.left, tuple.top, tuple.right, tuple.bottom)
     }
 
     private fun getVisionRejectReason(node: SnapshotNode): VisionRejectReason? {
@@ -473,10 +566,39 @@ object VisionPipeline {
     }
 
     private const val TAG = "VisionPipeline"
+
+    /** Max pool size matches the user-configurable OCR thread max (12). */
+    private const val OCR_POOL_SIZE = 12
+
+    /**
+     * FIXED-SIZE thread pool for OCR tasks — threads are NEVER destroyed.
+     * OpenMP (used by libRapidOcr.so) initializes TLS on each thread that calls
+     * native code. When that thread is destroyed, __kmp_internal_end_thread fires
+     * and crashes in ___kmp_free. A fixed pool with allowCoreThreadTimeOut(false)
+     * guarantees core threads persist forever, preventing the crash.
+     */
+    private val ocrExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.ThreadPoolExecutor(
+            OCR_POOL_SIZE, OCR_POOL_SIZE,
+            Long.MAX_VALUE, java.util.concurrent.TimeUnit.NANOSECONDS,
+            java.util.concurrent.LinkedBlockingQueue(),
+        ) { r ->
+            Thread(r).apply {
+                isDaemon = true
+                name = "ocr-worker-${threadCount.incrementAndGet()}"
+            }
+        }.apply { allowCoreThreadTimeOut(false) }
+    private val threadCount = java.util.concurrent.atomic.AtomicInteger(0)
     private const val VISION_CROP_MAX_EDGE_PX = 1080
     private const val MAX_VISION_SEGMENTS = 64
     private const val MAX_VISION_AREA_RATIO = 0.35
     private const val MIN_CHILD_COVERAGE_RATIO = 0.6f
     private const val VISION_FILTER_LOG_SAMPLE_COUNT = 8
     private const val OCR_TASK_TIMEOUT_MS = 1_200L
+    /** Total wall-clock deadline for all parallel OCR tasks combined. */
+    private const val PARALLEL_OCR_DEADLINE_MS = 5_000L
+    private const val FULLPAGE_MAX_EDGE_PX = 1280
+    /** Timeout for a single full-page OCR detectFullPage call.\n     *  GLM-OCR can take 10-20s on complex screens. */
+    private const val FULLPAGE_OCR_TIMEOUT_MS = 20_000L
+    const val SPARSE_TREE_THRESHOLD = 10
 }

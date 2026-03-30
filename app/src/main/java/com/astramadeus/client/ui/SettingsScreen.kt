@@ -48,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -261,9 +262,34 @@ private fun OcrSettingsPage(onBack: () -> Unit) {
         mutableStateOf(OcrPipelineConfig.getMaxParallelism(context).toFloat())
     }
 
+    val allEngines = remember { com.astramadeus.client.ocr.OcrEngineRegistry.allEngines(context) }
+    var activeEngineId by remember {
+        mutableStateOf(com.astramadeus.client.ocr.OcrEngineRegistry.getActiveEngine(context).id)
+    }
+
+    // Fallback engine for full-page OCR
+    var fallbackEngineId by remember {
+        val fallback = com.astramadeus.client.ocr.OcrEngineRegistry.getFallbackEngine(context)
+        mutableStateOf(fallback?.id ?: "")
+    }
+
+    // GLM-OCR disabled — see third_party/RapidOcrAndroidOnnx/README.md
+
+    // PaddleOCR download state
+    var paddleDownloadStatus by remember {
+        mutableStateOf(com.astramadeus.client.ocr.OcrModelDownloader.getStatus(context))
+    }
+    var paddleDownloadProgress by remember { mutableStateOf(0f) }
+    var paddleDownloadError by remember {
+        mutableStateOf(com.astramadeus.client.ocr.OcrModelDownloader.getLastError())
+    }
+
+
+
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -285,6 +311,356 @@ private fun OcrSettingsPage(onBack: () -> Unit) {
             )
         }
 
+        // Engine selection section
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.ocr_settings_default_engine),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = stringResource(R.string.ocr_settings_default_engine_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                allEngines.filter { !it.isFullPageOnly }.forEach { engine ->
+                    val isActive = engine.id == activeEngineId
+                    val isMlKit = engine.id == com.astramadeus.client.ocr.MlKitOcrEngine.ID
+                    val isPaddleOcr = engine.id == com.astramadeus.client.ocr.PaddleOcrEngine.ID
+                    val isRapidOcr = engine.id == com.astramadeus.client.ocr.RapidOcrEngine.ID
+                    // Derive availability from Compose state so recomposition
+                    // triggers when download status changes
+                    val isEngineAvailable = when {
+                        isPaddleOcr -> paddleDownloadStatus == com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADED
+                        else -> engine.isAvailable
+                    }
+
+                    ElevatedCard(
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = isEngineAvailable) {
+                                        com.astramadeus.client.ocr.OcrEngineRegistry
+                                            .setActiveEngineId(context, engine.id)
+                                        activeEngineId = engine.id
+                                    },
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = engine.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(
+                                        text = when {
+                                            isActive -> stringResource(R.string.ocr_engine_active)
+                                            isMlKit -> stringResource(R.string.ocr_engine_builtin)
+                                            isPaddleOcr && !isEngineAvailable ->
+                                                stringResource(R.string.ocr_engine_unavailable)
+                                            isRapidOcr && !isEngineAvailable ->
+                                                stringResource(R.string.ocr_engine_requires_aar)
+                                            else -> ""
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (isActive) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
+                                androidx.compose.material3.RadioButton(
+                                    selected = isActive,
+                                    onClick = {
+                                        if (isEngineAvailable) {
+                                            com.astramadeus.client.ocr.OcrEngineRegistry
+                                                .setActiveEngineId(context, engine.id)
+                                            activeEngineId = engine.id
+                                        }
+                                    },
+                                    enabled = isEngineAvailable,
+                                )
+                            }
+
+                            // Download controls for PaddleOCR
+                            if (isPaddleOcr) {
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                when (paddleDownloadStatus) {
+                                    com.astramadeus.client.ocr.BaseModelDownloader.Status.NOT_DOWNLOADED -> {
+                                        Button(
+                                            onClick = {
+                                                com.astramadeus.client.ocr.OcrModelDownloader.download(
+                                                    context,
+                                                    onProgress = { p ->
+                                                        paddleDownloadProgress = p
+                                                        paddleDownloadStatus =
+                                                            com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADING
+                                                    },
+                                                    onComplete = { success ->
+                                                        paddleDownloadStatus = if (success) {
+                                                            com.astramadeus.client.ocr.OcrEngineRegistry.refreshAvailability()
+                                                            com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADED
+                                                        } else {
+                                                            paddleDownloadError =
+                                                                com.astramadeus.client.ocr.OcrModelDownloader.getLastError()
+                                                            com.astramadeus.client.ocr.BaseModelDownloader.Status.ERROR
+                                                        }
+                                                    },
+                                                )
+                                            },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        ) {
+                                            Text(
+                                                stringResource(
+                                                    R.string.ocr_engine_download,
+                                                    com.astramadeus.client.ocr.OcrModelDownloader.estimatedSizeMb(),
+                                                )
+                                            )
+                                        }
+                                    }
+
+                                    com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADING -> {
+                                        Column {
+                                            androidx.compose.material3.LinearProgressIndicator(
+                                                progress = { paddleDownloadProgress },
+                                                modifier = Modifier.fillMaxWidth(),
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = stringResource(
+                                                    R.string.ocr_engine_downloading,
+                                                    (paddleDownloadProgress * 100).toInt(),
+                                                ),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+
+                                    com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADED -> {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                        ) {
+                                            Text(
+                                                text = stringResource(R.string.ocr_engine_downloaded),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                            androidx.compose.material3.TextButton(
+                                                onClick = {
+                                                    com.astramadeus.client.ocr.OcrModelDownloader.deleteModels(context)
+                                                    com.astramadeus.client.ocr.OcrEngineRegistry.refreshAvailability()
+                                                    paddleDownloadStatus =
+                                                        com.astramadeus.client.ocr.BaseModelDownloader.Status.NOT_DOWNLOADED
+                                                    // If active engine was PaddleOCR, switch back to ML Kit
+                                                    if (activeEngineId == com.astramadeus.client.ocr.PaddleOcrEngine.ID) {
+                                                        com.astramadeus.client.ocr.OcrEngineRegistry
+                                                            .setActiveEngineId(context, com.astramadeus.client.ocr.MlKitOcrEngine.ID)
+                                                        activeEngineId = com.astramadeus.client.ocr.MlKitOcrEngine.ID
+                                                    }
+                                                },
+                                            ) {
+                                                Text(
+                                                    text = stringResource(R.string.ocr_engine_delete_models),
+                                                    color = MaterialTheme.colorScheme.error,
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    com.astramadeus.client.ocr.BaseModelDownloader.Status.ERROR -> {
+                                        Column {
+                                            Text(
+                                                text = stringResource(
+                                                    R.string.ocr_engine_download_error,
+                                                    paddleDownloadError ?: "Unknown",
+                                                ),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Button(
+                                                onClick = {
+                                                    com.astramadeus.client.ocr.OcrModelDownloader.download(
+                                                        context,
+                                                        onProgress = { p ->
+                                                            paddleDownloadProgress = p
+                                                            paddleDownloadStatus =
+                                                                com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADING
+                                                        },
+                                                        onComplete = { success ->
+                                                            paddleDownloadStatus = if (success) {
+                                                                com.astramadeus.client.ocr.OcrEngineRegistry.refreshAvailability()
+                                                                com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADED
+                                                            } else {
+                                                                paddleDownloadError =
+                                                                    com.astramadeus.client.ocr.OcrModelDownloader.getLastError()
+                                                                com.astramadeus.client.ocr.BaseModelDownloader.Status.ERROR
+                                                            }
+                                                        },
+                                                    )
+                                                },
+                                                modifier = Modifier.fillMaxWidth(),
+                                            ) {
+                                                Text(
+                                                    stringResource(
+                                                        R.string.ocr_engine_download,
+                                                        com.astramadeus.client.ocr.OcrModelDownloader.estimatedSizeMb(),
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback engine selection section
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.ocr_settings_fallback_engine),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    text = stringResource(R.string.ocr_settings_fallback_engine_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                allEngines.filter { it.supportsFullPageDetection }.forEach { engine ->
+                    val isPaddleOcr = engine.id == com.astramadeus.client.ocr.PaddleOcrEngine.ID
+                    // Read download status states so Compose recomposes
+                    // when model availability changes after download
+                    val isEngineAvailable = when {
+                        isPaddleOcr -> paddleDownloadStatus == com.astramadeus.client.ocr.BaseModelDownloader.Status.DOWNLOADED
+                        else -> engine.isAvailable
+                    }
+                    val isFallbackActive = engine.id == fallbackEngineId
+
+                    ElevatedCard(
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = isEngineAvailable) {
+                                        com.astramadeus.client.ocr.OcrEngineRegistry
+                                            .setFallbackEngineId(context, engine.id)
+                                        fallbackEngineId = engine.id
+                                    },
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = engine.displayName,
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    if (!isEngineAvailable) {
+                                        Text(
+                                            text = stringResource(R.string.ocr_engine_unavailable),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    } else if (isFallbackActive) {
+                                        Text(
+                                            text = stringResource(R.string.ocr_engine_active),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                                androidx.compose.material3.RadioButton(
+                                    selected = isFallbackActive,
+                                    onClick = {
+                                        if (isEngineAvailable) {
+                                            com.astramadeus.client.ocr.OcrEngineRegistry
+                                                .setFallbackEngineId(context, engine.id)
+                                            fallbackEngineId = engine.id
+                                        }
+                                    },
+                                    enabled = isEngineAvailable,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // GPU acceleration toggle
+        var useGpu by remember { mutableStateOf(OcrPipelineConfig.getUseGpu(context)) }
+
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.ocr_gpu_toggle),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = stringResource(R.string.ocr_gpu_toggle_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                androidx.compose.material3.Switch(
+                    checked = useGpu,
+                    onCheckedChange = { enabled ->
+                        useGpu = enabled
+                        OcrPipelineConfig.setUseGpu(context, enabled)
+                        // Force re-initialization of ONNX-based engines
+                        com.astramadeus.client.ocr.OcrEngineRegistry.reinitializeEngines(context)
+                    },
+                )
+            }
+        }
+
+        // Parallelism slider
         ElevatedCard(
             shape = RoundedCornerShape(24.dp),
             modifier = Modifier.fillMaxWidth(),
@@ -318,6 +694,8 @@ private fun OcrSettingsPage(onBack: () -> Unit) {
                 )
             }
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
     }
 }
 

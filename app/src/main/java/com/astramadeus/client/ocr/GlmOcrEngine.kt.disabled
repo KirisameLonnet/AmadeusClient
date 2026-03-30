@@ -1,0 +1,634 @@
+package com.astramadeus.client.ocr
+
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Rect
+import android.util.Log
+import com.astramadeus.client.OcrPipelineConfig
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
+import java.nio.FloatBuffer
+import java.nio.LongBuffer
+import java.util.concurrent.locks.ReentrantLock
+
+/**
+ * Local GLM-OCR engine using ONNX Runtime.
+ *
+ * Uses three ONNX sessions from onnx-community/GLM-OCR-ONNX:
+ * - vision_encoder: image pixels to visual token embeddings
+ * - embed_tokens: text token IDs to text token embeddings
+ * - decoder_model_merged: embeddings + KV cache to next token logits
+ *
+ * Models must be downloaded via [GlmOcrModelDownloader] before use.
+ *
+ * ONNX Runtime sessions are NOT thread-safe for concurrent run() calls.
+ * All inference is serialized via [inferenceLock].
+ */
+class GlmOcrEngine(private val appContext: Context) : OcrEngine {
+
+    // ---- Loading state for reactive UI ----
+
+    sealed class LoadingState {
+        data object Idle : LoadingState()
+        data class Loading(val progress: Float, val stageName: String) : LoadingState()
+        data object Ready : LoadingState()
+        data class Failed(val error: String) : LoadingState()
+    }
+
+    private val _loadingState = MutableStateFlow<LoadingState>(LoadingState.Idle)
+    val loadingState: StateFlow<LoadingState> = _loadingState.asStateFlow()
+
+    @Volatile private var loadingThread: Thread? = null
+
+    override val id: String = ID
+    override val displayName: String = "GLM-OCR"
+    override val isAvailable: Boolean
+        get() = GlmOcrModelDownloader.allModelsPresent(appContext)
+
+    override val supportsFullPageDetection: Boolean = true
+    override val isFullPageOnly: Boolean = true
+
+    /** Serializes all ONNX inference calls — OrtSession.run() is not thread-safe. */
+    private val inferenceLock = ReentrantLock()
+
+    @Volatile private var ortEnv: OrtEnvironment? = null
+    @Volatile private var visionSession: OrtSession? = null
+    @Volatile private var embedSession: OrtSession? = null
+    @Volatile private var decoderSession: OrtSession? = null
+    @Volatile private var tokenizer: GlmOcrTokenizer? = null
+    @Volatile private var initialized = false
+
+    /** Synchronous initialization (blocks until complete). */
+    override fun initialize() {
+        if (initialized) return
+        if (!isAvailable) {
+            Log.w(TAG, "Models not downloaded, cannot initialize")
+            return
+        }
+        doInitialize()
+    }
+
+    /**
+     * Start asynchronous initialization in background.
+     * Progress is reported via [loadingState] StateFlow.
+     * Can be cancelled via [cancelInitialization].
+     */
+    fun initializeAsync() {
+        if (initialized) {
+            _loadingState.value = LoadingState.Ready
+            return
+        }
+        if (!isAvailable) {
+            _loadingState.value = LoadingState.Failed("Models not downloaded")
+            return
+        }
+        // Cancel any in-progress loading
+        cancelInitialization()
+
+        val thread = Thread({
+            doInitialize()
+        }, "GLM-OCR-Init")
+        loadingThread = thread
+        thread.start()
+    }
+
+    /** Cancel an in-progress async initialization. */
+    fun cancelInitialization() {
+        loadingThread?.interrupt()
+        loadingThread = null
+        if (!initialized) {
+            _loadingState.value = LoadingState.Idle
+        }
+    }
+
+    private fun doInitialize() {
+        try {
+            _loadingState.value = LoadingState.Loading(0f, STAGE_VISION)
+
+            val env = OrtEnvironment.getEnvironment()
+            ortEnv = env
+
+            val modelDir = GlmOcrModelDownloader.getModelDir(appContext)
+            val useGpu = OcrPipelineConfig.getUseGpu(appContext)
+            val opts = OrtSession.SessionOptions().apply {
+                setIntraOpNumThreads(4)
+                if (useGpu) {
+                    try {
+                        addNnapi()
+                        Log.i(TAG, "NNAPI execution provider enabled")
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "NNAPI unavailable, using CPU: ${e.message}")
+                    }
+                }
+            }
+
+            if (Thread.interrupted()) throw InterruptedException()
+
+            // Stage 1: Vision encoder (0-25%)
+            Log.d(TAG, "Loading vision encoder...")
+            visionSession = env.createSession(
+                File(modelDir, VISION_MODEL_FILE).absolutePath, opts
+            )
+            _loadingState.value = LoadingState.Loading(0.25f, STAGE_EMBED)
+            if (Thread.interrupted()) throw InterruptedException()
+
+            // Stage 2: Embed tokens (25-50%)
+            Log.d(TAG, "Loading embed tokens...")
+            embedSession = env.createSession(
+                File(modelDir, EMBED_MODEL_FILE).absolutePath, opts
+            )
+            _loadingState.value = LoadingState.Loading(0.50f, STAGE_DECODER)
+            if (Thread.interrupted()) throw InterruptedException()
+
+            // Stage 3: Decoder (50-75%)
+            Log.d(TAG, "Loading decoder...")
+            decoderSession = env.createSession(
+                File(modelDir, DECODER_MODEL_FILE).absolutePath, opts
+            )
+            _loadingState.value = LoadingState.Loading(0.75f, STAGE_TOKENIZER)
+            if (Thread.interrupted()) throw InterruptedException()
+
+            // Stage 4: Tokenizer (75-100%)
+            Log.d(TAG, "Loading tokenizer...")
+            tokenizer = GlmOcrTokenizer.load(modelDir)
+
+            initialized = tokenizer != null
+            if (initialized) {
+                _loadingState.value = LoadingState.Ready
+                Log.i(TAG, "GLM-OCR engine initialized (3 sessions, gpu=$useGpu)")
+            } else {
+                _loadingState.value = LoadingState.Failed("Tokenizer load failed")
+                Log.e(TAG, "Failed to load tokenizer")
+                release()
+            }
+        } catch (_: InterruptedException) {
+            Log.i(TAG, "GLM-OCR initialization cancelled")
+            releaseInternal()
+            _loadingState.value = LoadingState.Idle
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to initialize GLM-OCR: ${e.message}", e)
+            _loadingState.value = LoadingState.Failed(e.message ?: "Unknown error")
+            releaseInternal()
+        } finally {
+            loadingThread = null
+        }
+    }
+
+    override fun recognizeBitmap(bitmap: Bitmap): String {
+        if (!initialized) { initialize(); if (!initialized) return "" }
+        inferenceLock.lock()
+        return try {
+            runInference(bitmap)
+        } catch (e: Throwable) {
+            Log.w(TAG, "recognizeBitmap failed: ${e.message}"); ""
+        } finally {
+            inferenceLock.unlock()
+        }
+    }
+
+    override fun detectFullPage(bitmap: Bitmap): List<DetectedTextBlock> {
+        if (!initialized) { initialize(); if (!initialized) return emptyList() }
+        inferenceLock.lock()
+        return try {
+            val text = runInference(bitmap)
+            if (text.isBlank()) emptyList()
+            else listOf(DetectedTextBlock(text, Rect(0, 0, bitmap.width, bitmap.height), 1.0f))
+        } catch (e: Throwable) {
+            Log.w(TAG, "detectFullPage failed: ${e.message}"); emptyList()
+        } finally {
+            inferenceLock.unlock()
+        }
+    }
+
+    override fun release() {
+        cancelInitialization()
+        releaseInternal()
+        _loadingState.value = LoadingState.Idle
+    }
+
+    /** Internal cleanup without touching loadingState (used during cancelled init). */
+    private fun releaseInternal() {
+        visionSession?.close(); visionSession = null
+        embedSession?.close(); embedSession = null
+        decoderSession?.close(); decoderSession = null
+        ortEnv?.close(); ortEnv = null
+        tokenizer = null; initialized = false
+    }
+
+    // ---- Inference pipeline ----
+
+    private fun runInference(bitmap: Bitmap): String {
+        val env = ortEnv ?: return ""
+        val vSess = visionSession ?: return ""
+        val eSess = embedSession ?: return ""
+        val dSess = decoderSession ?: return ""
+        val tok = tokenizer ?: return ""
+
+        val t0 = System.currentTimeMillis()
+
+        // 1. Vision encoder: image -> visual token embeddings [num_features, hidden_size]
+        val (pixelValues, imageGridThw) = preprocessImage(env, bitmap)
+        val t1 = System.currentTimeMillis()
+        Log.d(TAG, "[inference] preprocess: ${t1 - t0}ms (bitmap=${bitmap.width}x${bitmap.height})")
+
+        val visionInputs = mutableMapOf<String, OnnxTensor>()
+        visionInputs["pixel_values"] = pixelValues
+        visionInputs["image_grid_thw"] = imageGridThw
+        val visionResults = vSess.run(visionInputs)
+        pixelValues.close()
+        imageGridThw.close()
+        val t2 = System.currentTimeMillis()
+        Log.d(TAG, "[inference] vision_encoder.run: ${t2 - t1}ms")
+
+        val visualTokensTensor = visionResults[0] as OnnxTensor
+        // Output is [num_features, hidden_size] (rank 2)
+        @Suppress("UNCHECKED_CAST")
+        val visualTokens = visualTokensTensor.value as Array<FloatArray>
+        val numVisualTokens = visualTokens.size
+        val hiddenSize = if (visualTokens.isNotEmpty()) visualTokens[0].size else HIDDEN_SIZE
+        Log.d(TAG, "[inference] visual_tokens: count=$numVisualTokens hidden=$hiddenSize")
+
+        // 2. Build prompt token IDs for OCR chat template:
+        //    [gMASK] sop user begin_of_image [image_placeholder] end_of_image assistant
+        val promptPrefix = tok.encode("[gMASK]")
+        val imageTokens = listOf(
+            GlmOcrTokenizer.IMAGE_START_TOKEN_ID,
+            GlmOcrTokenizer.IMAGE_TOKEN_ID,
+            GlmOcrTokenizer.IMAGE_END_TOKEN_ID,
+        )
+        val allPromptIds = promptPrefix + imageTokens
+
+        // 3. Get text token embeddings via embed_tokens session
+        val promptIdsBuf = LongBuffer.allocate(allPromptIds.size)
+        for (id in allPromptIds) promptIdsBuf.put(id.toLong())
+        promptIdsBuf.rewind()
+        val promptIdsTensor = OnnxTensor.createTensor(
+            env, promptIdsBuf, longArrayOf(1, allPromptIds.size.toLong())
+        )
+
+        val embedResults = eSess.run(
+            mapOf(eSess.inputNames.first() to promptIdsTensor)
+        )
+        promptIdsTensor.close()
+        val t3 = System.currentTimeMillis()
+        Log.d(TAG, "[inference] embed_tokens.run: ${t3 - t2}ms")
+
+        val promptEmbedsTensor = embedResults[0] as OnnxTensor
+        @Suppress("UNCHECKED_CAST")
+        val promptEmbeds = (promptEmbedsTensor.value as Array<Array<FloatArray>>)[0]
+
+        // 4. Build prefill input: prompt prefix embeds + visual tokens + image_end embed
+        val prefillEmbedsList = mutableListOf<FloatArray>()
+
+        // Prompt prefix embeddings (e.g., [gMASK])
+        for (i in 0 until promptPrefix.size) {
+            prefillEmbedsList.add(promptEmbeds[i])
+        }
+
+        // image_start embedding
+        prefillEmbedsList.add(promptEmbeds[promptPrefix.size])
+
+        // Replace image_token placeholder with actual visual token embeddings
+        for (vt in visualTokens) {
+            prefillEmbedsList.add(vt)
+        }
+
+        // image_end embedding
+        prefillEmbedsList.add(promptEmbeds[promptPrefix.size + 2])
+
+        val totalPrefillLen = prefillEmbedsList.size
+        val t4 = System.currentTimeMillis()
+        Log.d(TAG, "[inference] build_prefill: ${t4 - t3}ms (seq_len=$totalPrefillLen)")
+
+        embedResults.close()
+        visionResults.close()
+
+        // 5. Autoregressive decode
+        val generatedIds = autoregressiveDecode(
+            env, dSess, eSess, prefillEmbedsList, totalPrefillLen, hiddenSize
+        )
+        val t5 = System.currentTimeMillis()
+        Log.d(TAG, "[inference] decode: ${t5 - t4}ms (tokens=${generatedIds.size})")
+
+        // 6. Decode tokens to text
+        val text = tok.decode(generatedIds, skipSpecialTokens = true).trim()
+        val t6 = System.currentTimeMillis()
+        Log.d(TAG, "[inference] total: ${t6 - t0}ms | text_len=${text.length}")
+        return text
+    }
+
+    /**
+     * Autoregressive token generation with KV cache.
+     * Prefill: feed all input embeddings at once.
+     * Decode: feed one token embedding at a time with KV cache from previous step.
+     */
+    private fun autoregressiveDecode(
+        env: OrtEnvironment,
+        decoder: OrtSession,
+        embedder: OrtSession,
+        prefillEmbeds: List<FloatArray>,
+        totalPrefillLen: Int,
+        hiddenSize: Int,
+    ): List<Int> {
+        val generatedIds = mutableListOf<Int>()
+
+        // Create prefill input embeddings tensor [1, totalPrefillLen, hiddenSize]
+        val prefillBuf = FloatBuffer.allocate(totalPrefillLen * hiddenSize)
+        for (embed in prefillEmbeds) {
+            prefillBuf.put(embed)
+        }
+        prefillBuf.rewind()
+
+        val inputEmbedsTensor = OnnxTensor.createTensor(
+            env, prefillBuf, longArrayOf(1, totalPrefillLen.toLong(), hiddenSize.toLong())
+        )
+
+        // Attention mask: all ones
+        val attMaskBuf = LongBuffer.allocate(totalPrefillLen)
+        for (i in 0 until totalPrefillLen) attMaskBuf.put(1L)
+        attMaskBuf.rewind()
+        val attMaskTensor = OnnxTensor.createTensor(
+            env, attMaskBuf, longArrayOf(1, totalPrefillLen.toLong())
+        )
+
+        // Position IDs: M-RoPE format [3, batch, seq_len]
+        // For text tokens, all 3 dimensions use the same sequential position
+        val posIdsBuf = LongBuffer.allocate(3 * totalPrefillLen)
+        for (dim in 0 until 3) {
+            for (i in 0 until totalPrefillLen) posIdsBuf.put(i.toLong())
+        }
+        posIdsBuf.rewind()
+        val posIdsTensor = OnnxTensor.createTensor(
+            env, posIdsBuf, longArrayOf(3, 1, totalPrefillLen.toLong())
+        )
+
+        // num_logits_to_keep: scalar (rank 0) — only need logits for the last position
+        val numLogitsKeepBuf = LongBuffer.allocate(1); numLogitsKeepBuf.put(1L); numLogitsKeepBuf.rewind()
+        val numLogitsToKeep = OnnxTensor.createTensor(env, numLogitsKeepBuf, longArrayOf())
+
+        val inputs = mutableMapOf<String, OnnxTensor>()
+        inputs["inputs_embeds"] = inputEmbedsTensor
+        inputs["attention_mask"] = attMaskTensor
+        inputs["position_ids"] = posIdsTensor
+        inputs["num_logits_to_keep"] = numLogitsToKeep
+
+        // Empty past KV cache for prefill
+        for (i in 0 until NUM_LAYERS) {
+            val emptyKv = FloatBuffer.allocate(0)
+            val kvShape = longArrayOf(1, NUM_KV_HEADS.toLong(), 0, HEAD_DIM.toLong())
+            inputs["past_key_values.$i.key"] = OnnxTensor.createTensor(env, emptyKv, kvShape)
+            inputs["past_key_values.$i.value"] = OnnxTensor.createTensor(env, emptyKv, kvShape)
+        }
+
+        // Prefill step
+        val prefillStart = System.currentTimeMillis()
+        var results = decoder.run(inputs)
+        Log.d(TAG, "[decode] prefill: ${System.currentTimeMillis() - prefillStart}ms (seq_len=$totalPrefillLen)")
+        inputEmbedsTensor.close()
+        attMaskTensor.close()
+        posIdsTensor.close()
+        numLogitsToKeep.close()
+        // Close empty KV tensors
+        for (i in 0 until NUM_LAYERS) {
+            inputs["past_key_values.$i.key"]?.close()
+            inputs["past_key_values.$i.value"]?.close()
+        }
+
+        // Get logits from prefill: [1, num_logits_to_keep=1, vocab_size]
+        val prefillLogits = results[0] as OnnxTensor
+        var nextTokenId = sampleGreedy(prefillLogits)
+        generatedIds.add(nextTokenId)
+
+        // Extract present KV cache
+        var pastKvTensors = extractKvCache(results)
+
+        // Decode loop
+        var curPos = totalPrefillLen
+        val decodeStart = System.currentTimeMillis()
+        var repeatCount = 0
+        var lastTokenId = -1
+        for (step in 0 until MAX_NEW_TOKENS) {
+            if (nextTokenId == GlmOcrTokenizer.EOS_TOKEN_ID) break
+
+            // Repetition detection: stop if same token repeats N times
+            if (nextTokenId == lastTokenId) {
+                repeatCount++
+                if (repeatCount >= REPEAT_THRESHOLD) {
+                    Log.w(TAG, "[decode] stopping: token $nextTokenId repeated $REPEAT_THRESHOLD times at step $step")
+                    break
+                }
+            } else {
+                repeatCount = 1
+                lastTokenId = nextTokenId
+            }
+
+            // Get embedding for the new token via embed_tokens
+            val tokenIdBuf = LongBuffer.allocate(1)
+            tokenIdBuf.put(nextTokenId.toLong())
+            tokenIdBuf.rewind()
+            val tokenIdTensor = OnnxTensor.createTensor(
+                env, tokenIdBuf, longArrayOf(1, 1)
+            )
+
+            val embedResult = embedder.run(
+                mapOf(embedder.inputNames.first() to tokenIdTensor)
+            )
+            tokenIdTensor.close()
+
+            val stepEmbedsTensor = embedResult[0] as OnnxTensor
+
+            // Attention mask: curPos + 1
+            val stepAttMask = LongBuffer.allocate(curPos + 1)
+            for (i in 0..curPos) stepAttMask.put(1L)
+            stepAttMask.rewind()
+            val stepAttMaskTensor = OnnxTensor.createTensor(
+                env, stepAttMask, longArrayOf(1, (curPos + 1).toLong())
+            )
+
+            // Position ID: M-RoPE [3, 1, 1]
+            val stepPosIds = LongBuffer.allocate(3)
+            for (dim in 0 until 3) stepPosIds.put(curPos.toLong())
+            stepPosIds.rewind()
+            val stepPosIdsTensor = OnnxTensor.createTensor(
+                env, stepPosIds, longArrayOf(3, 1, 1)
+            )
+
+            val stepNlkBuf = LongBuffer.allocate(1); stepNlkBuf.put(1L); stepNlkBuf.rewind()
+            val stepNumLogits = OnnxTensor.createTensor(env, stepNlkBuf, longArrayOf())
+
+            val stepInputs = mutableMapOf<String, OnnxTensor>()
+            stepInputs["inputs_embeds"] = stepEmbedsTensor
+            stepInputs["attention_mask"] = stepAttMaskTensor
+            stepInputs["position_ids"] = stepPosIdsTensor
+            stepInputs["num_logits_to_keep"] = stepNumLogits
+
+            // Pass KV cache
+            for (i in 0 until NUM_LAYERS) {
+                stepInputs["past_key_values.$i.key"] = pastKvTensors[i * 2]
+                stepInputs["past_key_values.$i.value"] = pastKvTensors[i * 2 + 1]
+            }
+
+            // Run decoder — must happen BEFORE closing old results,
+            // because pastKvTensors are references into the old Result object.
+            val prevResults = results
+            results = decoder.run(stepInputs)
+            prevResults.close()  // safe now: decoder.run() already consumed the KV tensors
+
+            embedResult.close()
+            stepAttMaskTensor.close()
+            stepPosIdsTensor.close()
+            stepNumLogits.close()
+
+            val stepLogits = results[0] as OnnxTensor
+            nextTokenId = sampleGreedy(stepLogits)
+            generatedIds.add(nextTokenId)
+
+            // Extract new KV cache (refs into new results — don't close separately)
+            pastKvTensors = extractKvCache(results)
+
+            curPos++
+
+            // Log every 10 steps to track decode speed
+            if ((step + 1) % 10 == 0) {
+                val elapsed = System.currentTimeMillis() - decodeStart
+                val tps = (step + 1) * 1000.0 / elapsed
+                Log.d(TAG, "[decode] step=${step + 1} tokens=${generatedIds.size} elapsed=${elapsed}ms tps=${"%,.1f".format(tps)}")
+            }
+        }
+
+        // Cleanup
+        results.close()
+
+        return generatedIds
+    }
+
+    /** Sample the argmax token from logits tensor [batch, num_logits_to_keep, vocab]. */
+    private fun sampleGreedy(logitsTensor: OnnxTensor): Int {
+        @Suppress("UNCHECKED_CAST")
+        val logits = (logitsTensor.value as Array<Array<FloatArray>>)[0]
+        // Take the last (or only) position
+        val posLogits = logits[logits.size - 1]
+        var maxIdx = 0
+        var maxVal = posLogits[0]
+        for (i in 1 until posLogits.size) {
+            if (posLogits[i] > maxVal) {
+                maxVal = posLogits[i]
+                maxIdx = i
+            }
+        }
+        return maxIdx
+    }
+
+    /**
+     * Extract present KV cache tensors from decoder results.
+     * Merged decoder outputs: [logits, present.0.key, present.0.value, ...]
+     */
+    private fun extractKvCache(results: OrtSession.Result): List<OnnxTensor> {
+        val kvTensors = mutableListOf<OnnxTensor>()
+        for (i in 1 until results.size()) {
+            kvTensors.add(results[i] as OnnxTensor)
+        }
+        return kvTensors
+    }
+
+    /**
+     * Preprocess bitmap for CogViT q4 model:
+     * - Resize to IMAGE_SIZE × IMAGE_SIZE
+     * - Extract PATCH_SIZE × PATCH_SIZE patches
+     * - Normalize each patch pixel with CLIP stats
+     * - Flatten to [num_patches, 3 * PATCH_SIZE * PATCH_SIZE]
+     * Also creates image_grid_thw tensor [1, 3] = [temporal=1, grid_h, grid_w]
+     *
+     * Returns a Pair of (pixel_values tensor, image_grid_thw tensor).
+     */
+    private fun preprocessImage(env: OrtEnvironment, bitmap: Bitmap): Pair<OnnxTensor, OnnxTensor> {
+        val resized = Bitmap.createScaledBitmap(bitmap, IMAGE_SIZE, IMAGE_SIZE, true)
+        val pixels = IntArray(IMAGE_SIZE * IMAGE_SIZE)
+        resized.getPixels(pixels, 0, IMAGE_SIZE, 0, 0, IMAGE_SIZE, IMAGE_SIZE)
+        if (resized !== bitmap) resized.recycle()
+
+        val mean = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
+        val std = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
+
+        val gridH = IMAGE_SIZE / PATCH_SIZE  // 24
+        val gridW = IMAGE_SIZE / PATCH_SIZE  // 24
+        val numPatches = gridH * gridW       // 576
+        val patchPixels = TEMPORAL_PATCH_SIZE * 3 * PATCH_SIZE * PATCH_SIZE  // 1176
+
+        val floatBuffer = FloatBuffer.allocate(numPatches * patchPixels)
+
+        // Extract patches in row-major order: for each patch, flatten [T, C, pH, pW]
+        // For a single image, duplicate the same patch for each temporal frame
+        for (patchRow in 0 until gridH) {
+            for (patchCol in 0 until gridW) {
+                val startY = patchRow * PATCH_SIZE
+                val startX = patchCol * PATCH_SIZE
+                // Repeat for temporal_patch_size frames (same image data)
+                for (t in 0 until TEMPORAL_PATCH_SIZE) {
+                    for (c in 0 until 3) {
+                        for (dy in 0 until PATCH_SIZE) {
+                            for (dx in 0 until PATCH_SIZE) {
+                                val pixel = pixels[(startY + dy) * IMAGE_SIZE + (startX + dx)]
+                                val channelValue = when (c) {
+                                    0 -> (pixel shr 16) and 0xFF
+                                    1 -> (pixel shr 8) and 0xFF
+                                    2 -> pixel and 0xFF
+                                    else -> 0
+                                }
+                                floatBuffer.put((channelValue / 255f - mean[c]) / std[c])
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        floatBuffer.rewind()
+
+        val pixelValuesTensor = OnnxTensor.createTensor(
+            env, floatBuffer, longArrayOf(numPatches.toLong(), patchPixels.toLong())
+        )
+
+        // image_grid_thw: [num_images=1, 3] with [temporal=TEMPORAL_PATCH_SIZE, grid_h, grid_w]
+        val gridBuf = LongBuffer.allocate(3)
+        gridBuf.put(TEMPORAL_PATCH_SIZE.toLong())
+        gridBuf.put(gridH.toLong())
+        gridBuf.put(gridW.toLong())
+        gridBuf.rewind()
+        val gridTensor = OnnxTensor.createTensor(
+            env, gridBuf, longArrayOf(1, 3)
+        )
+
+        return Pair(pixelValuesTensor, gridTensor)
+    }
+
+    companion object {
+        const val ID = "glm_ocr"
+        private const val TAG = "GlmOcr"
+        private const val VISION_MODEL_FILE = "vision_encoder_q4.onnx"
+        private const val EMBED_MODEL_FILE = "embed_tokens_q4.onnx"
+        private const val DECODER_MODEL_FILE = "decoder_model_merged_q4.onnx"
+
+        // From config.json
+        private const val IMAGE_SIZE = 336
+        private const val PATCH_SIZE = 14
+        private const val TEMPORAL_PATCH_SIZE = 2
+        private const val HIDDEN_SIZE = 1536
+        private const val NUM_LAYERS = 16
+        private const val NUM_KV_HEADS = 8
+        private const val HEAD_DIM = 128
+        private const val MAX_NEW_TOKENS = 1024
+        /** Stop if the same token is generated this many times in a row. */
+        private const val REPEAT_THRESHOLD = 5
+
+        // Loading stage names (displayed in progress bar)
+        const val STAGE_VISION = "Loading vision encoder…"
+        const val STAGE_EMBED = "Loading embed tokens…"
+        const val STAGE_DECODER = "Loading decoder…"
+        const val STAGE_TOKENIZER = "Loading tokenizer…"
+    }
+}

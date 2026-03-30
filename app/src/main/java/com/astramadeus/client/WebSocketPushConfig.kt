@@ -10,7 +10,7 @@ object WebSocketPushConfig {
     const val DEFAULT_WS_URL = "ws://127.0.0.1:6910"
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun isEnabled(context: Context): Boolean {
         return prefs(context).getBoolean(KEY_ENABLED, false)

@@ -61,6 +61,7 @@ object SnapshotBuilder {
                     .put("desc", node.optString("desc"))
                     .put("class_name", node.optString("class_name"))
                     .put("resource_id", node.optString("resource_id"))
+                    .put("bounds", node.optString("bounds"))
                     .put("child_count", node.optInt("child_count"))
                     .put("is_clickable", node.optBoolean("is_clickable"))
                     .put("is_enabled", node.optBoolean("is_enabled"))
@@ -87,6 +88,8 @@ object SnapshotBuilder {
         depth: Int,
         indexInParent: Int,
     ) {
+        if (depth > MAX_DEPTH) return
+
         val nodeId = "node_${nextId.next()}"
         elements.put(nodeToJson(node, nodeId, parentId, depth, indexInParent))
 
@@ -127,6 +130,9 @@ object SnapshotBuilder {
             .put("is_editable", node.isEditable)
             .put("is_selected", node.isSelected)
             .put("is_visible_to_user", node.isVisibleToUser)
+            .put("is_checkable", node.isCheckable)
+            .put("is_checked", node.isChecked)
+            .put("is_long_clickable", node.isLongClickable)
     }
 
     private fun isMeaningfulNode(node: JSONObject): Boolean {
@@ -159,5 +165,6 @@ object SnapshotBuilder {
         }
     }
 
+    private const val MAX_DEPTH = 40
     private const val REQUEST_EVENT_TYPE = "TYPE_SNAPSHOT_REQUESTED"
 }
