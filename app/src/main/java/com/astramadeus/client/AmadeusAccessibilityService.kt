@@ -156,6 +156,7 @@ class AmadeusAccessibilityService : AccessibilityService() {
         }
 
         val needsVision = VisionAssistConfig.isVisionAssistEnabled(this, rootPackageName) || hasOverlay
+        val useVlModelPath = VisionAssistConfig.shouldUseVlModelPath(this, rootPackageName)
 
         // Track foreground package and manage heartbeat for vision-enabled apps
         val foregroundChanged = rootPackageName != currentForegroundPackage
@@ -167,6 +168,28 @@ class AmadeusAccessibilityService : AccessibilityService() {
             publishSnapshot(snapshot, snapshotSignature, now)
             return
         }
+
+        // VL Model mode: skip OCR pipeline entirely.
+        // Raw UI tree (sanitized by FrameSanitizer during WS transport) serves as
+        // a local "coordinate dictionary". VL model uses phone_vision_describe +
+        // phone_vision_tap for perceive → act workflow.
+        // OverlayDetector results (overlay_detected, close button) remain in the
+        // snapshot from the analysis above — no OCR needed for those.
+        if (useVlModelPath) {
+            if (foregroundChanged) {
+                startHeartbeat()
+            }
+            stopVisionPolling()
+            // Strip to leaf nodes only — containers are useless for coordinate lookup.
+            // Only the actual UI widgets (buttons, text, images) matter as the
+            // "coordinate dictionary" for phone_vision_tap.
+            val leafCount = filterToLeafNodes(snapshot)
+            Log.d(TAG, "VL Model mode: skipping OCR pipeline for $rootPackageName (leaves=$leafCount, original=${elements?.length() ?: 0})")
+            publishSnapshot(snapshot, snapshotSignature, now)
+            return
+        }
+
+        // --- Legacy vision mode (VL mode disabled): full OCR pipeline below ---
 
         // Start/restart heartbeat when a vision-enabled app is in foreground
         if (foregroundChanged) {
@@ -568,5 +591,44 @@ class AmadeusAccessibilityService : AccessibilityService() {
 
     private fun parseScreenBoundsFromElements(elements: JSONArray): BoundsParser.RectTuple? {
         return BoundsParser.parseScreenBoundsFromElements(elements)
+    }
+
+    /**
+     * Filter the snapshot's elements array to only keep leaf nodes (child_count == 0)
+     * and actionable non-leaf nodes (clickable/scrollable containers that are valid
+     * tap/scroll targets). Removes pure container/layout nodes that add no value
+     * to the "coordinate dictionary" used by phone_vision_tap.
+     *
+     * @return the number of elements remaining after filtering.
+     */
+    private fun filterToLeafNodes(snapshot: JSONObject): Int {
+        val data = snapshot.optJSONObject("data") ?: return 0
+        val elements = data.optJSONArray("elements") ?: return 0
+
+        val filtered = JSONArray()
+        for (i in 0 until elements.length()) {
+            val node = elements.optJSONObject(i) ?: continue
+            val childCount = node.optInt("child_count", 0)
+            val isLeaf = childCount == 0
+
+            // Keep leaf nodes (actual UI widgets)
+            if (isLeaf) {
+                filtered.put(node)
+                continue
+            }
+
+            // Also keep non-leaf nodes that are actionable targets
+            // (e.g., a clickable FrameLayout that wraps an icon)
+            val isClickable = node.optBoolean("is_clickable", false)
+            val isScrollable = node.optBoolean("is_scrollable", false)
+            val hasText = node.optString("text", "").isNotBlank() ||
+                node.optString("desc", "").isNotBlank()
+            if (isClickable || isScrollable || hasText) {
+                filtered.put(node)
+            }
+        }
+
+        data.put("elements", filtered)
+        return filtered.length()
     }
 }

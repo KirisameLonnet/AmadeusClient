@@ -996,6 +996,43 @@ private fun VisionAssistAppsPage(onBack: () -> Unit) {
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        // VL Model Available toggle
+        var vlModelEnabled by remember { mutableStateOf(VisionAssistConfig.isVlModelAvailable(context)) }
+        ElevatedCard(
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(R.string.vl_model_available_title),
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = stringResource(R.string.vl_model_available_subtitle),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Switch(
+                    checked = vlModelEnabled,
+                    onCheckedChange = { checked ->
+                        vlModelEnabled = checked
+                        VisionAssistConfig.setVlModelAvailable(context, checked)
+                    },
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(2.dp),

@@ -7,6 +7,7 @@ object VisionAssistConfig {
     private const val KEY_ENABLED_PACKAGES = "enabled_packages"
     private const val KEY_SHOW_SYSTEM_APPS = "show_system_apps"
     private const val KEY_SORT_MODE = "sort_mode"
+    private const val KEY_VL_MODEL_AVAILABLE = "vl_model_available"
 
     const val SORT_APP_NAME_ASC = "app_name_asc"
     const val SORT_APP_NAME_DESC = "app_name_desc"
@@ -46,6 +47,28 @@ object VisionAssistConfig {
 
     fun setSortMode(context: Context, sortMode: String) {
         prefs(context).edit().putString(KEY_SORT_MODE, sortMode).apply()
+    }
+
+    /**
+     * When VL model is available AND vision assist is enabled for an app,
+     * the expensive OCR vision pipeline is skipped. The raw UI tree is still
+     * sent (sanitized) for local coordinate lookup, while the VL model uses
+     * screenshots directly for visual understanding.
+     */
+    fun isVlModelAvailable(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_VL_MODEL_AVAILABLE, true)
+    }
+
+    fun setVlModelAvailable(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_VL_MODEL_AVAILABLE, enabled).apply()
+    }
+
+    /**
+     * Check if the given package should use the VL model path:
+     * vision assist enabled AND VL model available.
+     */
+    fun shouldUseVlModelPath(context: Context, packageName: String): Boolean {
+        return isVisionAssistEnabled(context, packageName) && isVlModelAvailable(context)
     }
 
     private fun prefs(context: Context) =

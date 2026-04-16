@@ -24,6 +24,8 @@
     <string name="vision_assist_apps_title">Vision assist apps</string>
     <string name="vision_assist_entry_title">Vision assist app list</string>
     <string name="vision_assist_entry_subtitle">Pick apps that should use screenshot + crop parsing.</string>
+    <string name="vl_model_available_title">VL Model Available</string>
+    <string name="vl_model_available_subtitle">When enabled, vision-assisted apps use screenshot understanding + UI tree positioning instead of OCR pipeline. Requires a VL (Vision-Language) model.</string>
     <string name="websocket_settings_title">WebSocket push settings</string>
     <string name="websocket_settings_subtitle">Push ui_state JSON frames to your server endpoint.</string>
     <string name="websocket_enable_push">Enable WebSocket push</string>
